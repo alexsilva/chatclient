@@ -124,12 +124,25 @@
     compareDivider.style.left = `${leftWidth}px`;
   }
 
-  function updateLayout() {
+  let lastLayoutKey = '';
+
+  function updateLayout(force = false) {
     updateDividerPosition();
 
-    if (isElectron) {
-      bridge.updateLayout(getLayout()).catch(() => {});
+    if (!isElectron) {
+      return;
     }
+
+    // renderState roda a cada evento de estado (inclusive show/hide do
+    // rail/toolbar); só vale pagar o IPC quando o layout mudou de fato.
+    const nextLayout = getLayout();
+    const key = JSON.stringify(nextLayout);
+    if (!force && key === lastLayoutKey) {
+      return;
+    }
+
+    lastLayoutKey = key;
+    bridge.updateLayout(nextLayout).catch(() => {});
   }
 
   async function setMode(nextMode) {
@@ -278,7 +291,7 @@
     }
   });
 
-  window.addEventListener('resize', updateLayout);
+  window.addEventListener('resize', () => updateLayout());
   window.addEventListener('keydown', (event) => {
     if (event.key === 'Escape' && settingsPanel.classList.contains('visible')) {
       closeSettings();
@@ -342,19 +355,34 @@
     document.getElementById('viewSurface').appendChild(preview);
 
     window.addEventListener('pointermove', (event) => {
-      const hotCornerSize = 28;
+      const railHandleWidth = 14;
+      const railHandleHeight = 110;
+      const toolbarHandleWidth = 72;
+      const toolbarHandleHeight = 16;
+      const toolbarInset = 8;
 
-      if (event.clientX <= hotCornerSize && event.clientY <= hotCornerSize) {
+      const railHandleTop = Math.max(
+        0,
+        (window.innerHeight - railHandleHeight) / 2
+      );
+      const inRailHandle =
+        event.clientX <= railHandleWidth &&
+        event.clientY >= railHandleTop &&
+        event.clientY <= railHandleTop + railHandleHeight;
+
+      if (inRailHandle) {
         clearTimeout(previewRailTimer);
         setPreviewChromeVisibility('rail', true);
       } else if (state.railVisible && event.clientX > 66) {
         schedulePreviewHide('rail');
       }
 
-      if (
-        event.clientX >= window.innerWidth - hotCornerSize &&
-        event.clientY <= hotCornerSize
-      ) {
+      const inToolbarHandle =
+        event.clientX >=
+          window.innerWidth - toolbarHandleWidth - toolbarInset &&
+        event.clientY <= toolbarHandleHeight;
+
+      if (inToolbarHandle) {
         clearTimeout(previewToolbarTimer);
         setPreviewChromeVisibility('toolbar', true);
       } else if (state.toolbarVisible && event.clientY > 72) {

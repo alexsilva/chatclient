@@ -14,6 +14,7 @@ contextBridge.exposeInMainWorld('chatClient', {
   setRestoreWorkspace: (enabled) =>
     ipcRenderer.invoke('chatclient:set-restore-workspace', enabled),
   setShellOverlay: (visible) => ipcRenderer.invoke('chatclient:set-shell-overlay', visible),
+  revealChrome: (target) => ipcRenderer.invoke('chatclient:chrome-reveal', target),
   onState: (callback) => {
     const listener = (_event, state) => callback(state);
     ipcRenderer.on('chatclient:state', listener);
@@ -23,6 +24,11 @@ contextBridge.exposeInMainWorld('chatClient', {
     const listener = (_event, status) => callback(status);
     ipcRenderer.on('chatclient:provider-status', listener);
     return () => ipcRenderer.removeListener('chatclient:provider-status', listener);
+  },
+  onLoadingState: (callback) => {
+    const listener = (_event, state) => callback(state);
+    ipcRenderer.on('chatclient:loading-state', listener);
+    return () => ipcRenderer.removeListener('chatclient:loading-state', listener);
   },
   onChromeState: (callback) => {
     const listener = (_event, state) => callback(state);

@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ChatClient Loading</title>
+  <link rel="stylesheet" href="chrome.css">
+</head>
+<body class="loading-body">
+  <div class="loading-shell" role="status" aria-live="polite">
+    <div class="loading-spinner" aria-hidden="true"></div>
+    <div class="loading-label" id="loadingLabel">Carregando…</div>
+    <div class="loading-progress" aria-hidden="true">
+      <div class="loading-progress-bar"></div>
+    </div>
+    <div class="loading-error" id="loadingError" hidden></div>
+    <button class="loading-retry" id="retryButton" hidden>Tentar novamente</button>
+  </div>
+  <script src="chrome-loading.js"></script>
+</body>
+</html>

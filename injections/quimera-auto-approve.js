@@ -7,6 +7,8 @@
   const MAX_ANCESTOR_DEPTH = 14;
   const CLICK_DELAY_MIN_MS = 400;
   const CLICK_DELAY_MAX_MS = 900;
+  const SCAN_DEBOUNCE_MS = 500;
+  const BUTTON_SELECTOR = 'button, [role="button"]';
   const LOG_PREFIX = '[chatclient:quimera]';
 
   if (window[API_KEY]?.version === 1) {
@@ -52,7 +54,7 @@
       return;
     }
 
-    for (const candidate of document.querySelectorAll('button, [role="button"]')) {
+    for (const candidate of document.querySelectorAll(BUTTON_SELECTOR)) {
       if (state.processedButtons.has(candidate)) {
         continue;
       }
@@ -79,20 +81,45 @@
     }
   }
 
-  let scanScheduled = false;
+  let scanTimer = null;
   function scheduleScan() {
-    if (scanScheduled) {
+    if (scanTimer !== null) {
       return;
     }
 
-    scanScheduled = true;
-    requestAnimationFrame(() => {
-      scanScheduled = false;
+    scanTimer = setTimeout(() => {
+      scanTimer = null;
       scanAndApprove();
-    });
+    }, SCAN_DEBOUNCE_MS);
   }
 
-  const observer = new MutationObserver(scheduleScan);
+  function mutationsMayContainButton(mutations) {
+    for (const mutation of mutations) {
+      for (const node of mutation.addedNodes) {
+        if (node.nodeType === Node.ELEMENT_NODE) {
+          if (node.matches(BUTTON_SELECTOR) || node.querySelector(BUTTON_SELECTOR)) {
+            return true;
+          }
+          continue;
+        }
+
+        // Labels de botão podem chegar como text nodes inseridos depois do elemento.
+        if (node.nodeType === Node.TEXT_NODE && node.parentElement?.closest(BUTTON_SELECTOR)) {
+          return true;
+        }
+      }
+    }
+
+    return false;
+  }
+
+  const observer = new MutationObserver((mutations) => {
+    if (!state.enabled || !mutationsMayContainButton(mutations)) {
+      return;
+    }
+
+    scheduleScan();
+  });
   observer.observe(document.documentElement, { childList: true, subtree: true });
 
   window[API_KEY] = {

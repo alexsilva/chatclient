@@ -37,6 +37,24 @@
     await bridge.refresh().catch(() => {});
   });
 
+  function renderChrome(state) {
+    document.body.classList.toggle('collapsed', !state.toolbarVisible);
+  }
+
+  // Recolhida, a view inteira é a alça: qualquer hover pede o reveal.
+  let lastRevealAt = 0;
+  document.addEventListener('pointermove', () => {
+    const now = Date.now();
+    if (document.body.classList.contains('collapsed') && now - lastRevealAt > 150) {
+      lastRevealAt = now;
+      bridge.revealChrome('toolbar').catch(() => {});
+    }
+  });
+
   bridge.onState(render);
-  bridge.getState().then(render).catch(() => {});
+  bridge.onChromeState(renderChrome);
+  bridge.getState().then((state) => {
+    render(state);
+    renderChrome(state);
+  }).catch(() => {});
 })();

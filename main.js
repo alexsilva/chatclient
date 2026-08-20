@@ -39,10 +39,14 @@ const CHROME_REVEAL = {
   toolbarWidth: 184,
   toolbarHeight: 44,
   toolbarInset: 8,
-  hotCornerSize: 28,
+  railHandleWidth: 14,
+  railHandleHeight: 110,
+  toolbarHandleWidth: 72,
+  toolbarHandleHeight: 16,
   holdMargin: 18,
   hideDelayMs: 650,
-  pollIntervalMs: 75
+  pollIntervalMs: 75,
+  idlePollIntervalMs: 250
 };
 
 const QUIMERA_AUTO_APPROVE_SCRIPT = readFileSync(
@@ -59,7 +63,8 @@ let quimeraAutoApproveEnabled = true;
 let shellOverlayVisible = false;
 let railVisible = false;
 let toolbarVisible = false;
-let chromeHoverInterval = null;
+let chromeHoverTimer = null;
+let chromeHoverActive = false;
 let railLastIntentAt = 0;
 let toolbarLastIntentAt = 0;
 let sessionStatePath = null;
@@ -237,6 +242,15 @@ function emitChromeState() {
     railVisible,
     toolbarVisible
   });
+
+  for (const view of chromeViews.values()) {
+    if (!view.webContents.isDestroyed()) {
+      view.webContents.send('chatclient:chrome-state', {
+        railVisible,
+        toolbarVisible
+      });
+    }
+  }
 }
 
 function setChromeVisibility(nextRailVisible, nextToolbarVisible) {
@@ -253,6 +267,27 @@ function setChromeVisibility(nextRailVisible, nextToolbarVisible) {
   emitChromeState();
 }
 
+const appliedViewBounds = new WeakMap();
+
+// setBounds numa WebContentsView força relayout do Chromium mesmo com o
+// mesmo retângulo; como updateLayout chega via IPC em cada mudança de
+// estado do chrome, vale pular quando nada mudou.
+function setViewBounds(view, bounds) {
+  const previous = appliedViewBounds.get(view);
+  if (
+    previous &&
+    previous.x === bounds.x &&
+    previous.y === bounds.y &&
+    previous.width === bounds.width &&
+    previous.height === bounds.height
+  ) {
+    return;
+  }
+
+  appliedViewBounds.set(view, bounds);
+  view.setBounds(bounds);
+}
+
 function applyChromeOverlayLayout() {
   if (!mainWindow || mainWindow.isDestroyed()) {
     return;
@@ -267,24 +302,46 @@ function applyChromeOverlayLayout() {
   const [width, height] = mainWindow.getContentSize();
   const overlaysAllowed = !shellOverlayVisible;
 
-  rail.setBounds({
-    x: 0,
-    y: 0,
-    width: CHROME_REVEAL.railWidth,
-    height
-  });
-  rail.setVisible(overlaysAllowed && railVisible);
+  if (railVisible) {
+    setViewBounds(rail, {
+      x: 0,
+      y: 0,
+      width: CHROME_REVEAL.railWidth,
+      height
+    });
+  } else {
+    // Recolhido, o rail vira uma alça fina na borda esquerda (estilo Android).
+    setViewBounds(rail, {
+      x: 0,
+      y: Math.max(0, Math.round((height - CHROME_REVEAL.railHandleHeight) / 2)),
+      width: CHROME_REVEAL.railHandleWidth,
+      height: CHROME_REVEAL.railHandleHeight
+    });
+  }
+  rail.setVisible(overlaysAllowed);
 
-  toolbar.setBounds({
-    x: Math.max(
-      0,
-      width - CHROME_REVEAL.toolbarWidth - CHROME_REVEAL.toolbarInset
-    ),
-    y: CHROME_REVEAL.toolbarInset,
-    width: CHROME_REVEAL.toolbarWidth,
-    height: CHROME_REVEAL.toolbarHeight
-  });
-  toolbar.setVisible(overlaysAllowed && toolbarVisible);
+  if (toolbarVisible) {
+    setViewBounds(toolbar, {
+      x: Math.max(
+        0,
+        width - CHROME_REVEAL.toolbarWidth - CHROME_REVEAL.toolbarInset
+      ),
+      y: CHROME_REVEAL.toolbarInset,
+      width: CHROME_REVEAL.toolbarWidth,
+      height: CHROME_REVEAL.toolbarHeight
+    });
+  } else {
+    setViewBounds(toolbar, {
+      x: Math.max(
+        0,
+        width - CHROME_REVEAL.toolbarHandleWidth - CHROME_REVEAL.toolbarInset
+      ),
+      y: 0,
+      width: CHROME_REVEAL.toolbarHandleWidth,
+      height: CHROME_REVEAL.toolbarHandleHeight
+    });
+  }
+  toolbar.setVisible(overlaysAllowed);
 }
 
 function pollChromeHover() {
@@ -314,12 +371,22 @@ function pollChromeHover() {
   const localY = cursor.y - bounds.y;
   const now = Date.now();
 
-  const inRailHotCorner =
-    localX <= CHROME_REVEAL.hotCornerSize &&
-    localY <= CHROME_REVEAL.hotCornerSize;
-  const inToolbarHotCorner =
-    localX >= bounds.width - CHROME_REVEAL.hotCornerSize &&
-    localY <= CHROME_REVEAL.hotCornerSize;
+  const railHandleTop = Math.max(
+    0,
+    (bounds.height - CHROME_REVEAL.railHandleHeight) / 2
+  );
+  const inRailHandle =
+    !railVisible &&
+    localX <= CHROME_REVEAL.railHandleWidth &&
+    localY >= railHandleTop &&
+    localY <= railHandleTop + CHROME_REVEAL.railHandleHeight;
+  const inToolbarHandle =
+    !toolbarVisible &&
+    localX >=
+      bounds.width -
+        CHROME_REVEAL.toolbarHandleWidth -
+        CHROME_REVEAL.toolbarInset &&
+    localY <= CHROME_REVEAL.toolbarHandleHeight;
 
   const insideVisibleRail =
     railVisible &&
@@ -336,11 +403,11 @@ function pollChromeHover() {
         CHROME_REVEAL.toolbarInset +
         CHROME_REVEAL.holdMargin;
 
-  if (inRailHotCorner || insideVisibleRail) {
+  if (inRailHandle || insideVisibleRail) {
     railLastIntentAt = now;
   }
 
-  if (inToolbarHotCorner || insideVisibleToolbar) {
+  if (inToolbarHandle || insideVisibleToolbar) {
     toolbarLastIntentAt = now;
   }
 
@@ -350,20 +417,98 @@ function pollChromeHover() {
   );
 }
 
-function startChromeHoverTracking() {
-  if (chromeHoverInterval) {
-    clearInterval(chromeHoverInterval);
+function scheduleChromeHoverPoll() {
+  if (!chromeHoverActive) {
+    return;
   }
 
+  // Poll rápido só quando algum overlay está visível; ocioso, poupa o main process.
+  const intervalMs = railVisible || toolbarVisible
+    ? CHROME_REVEAL.pollIntervalMs
+    : CHROME_REVEAL.idlePollIntervalMs;
+
+  chromeHoverTimer = setTimeout(() => {
+    pollChromeHover();
+    scheduleChromeHoverPoll();
+  }, intervalMs);
+}
+
+function startChromeHoverTracking() {
+  if (chromeHoverActive) {
+    return;
+  }
+
+  chromeHoverActive = true;
   railLastIntentAt = 0;
   toolbarLastIntentAt = 0;
-  chromeHoverInterval = setInterval(pollChromeHover, CHROME_REVEAL.pollIntervalMs);
+  scheduleChromeHoverPoll();
 }
 
 function stopChromeHoverTracking() {
-  if (chromeHoverInterval) {
-    clearInterval(chromeHoverInterval);
-    chromeHoverInterval = null;
+  chromeHoverActive = false;
+  clearTimeout(chromeHoverTimer);
+  chromeHoverTimer = null;
+}
+
+const providerLoading = new Map();
+
+function setProviderLoading(providerId, patch) {
+  const previous = providerLoading.get(providerId) || { loading: false, error: null };
+  providerLoading.set(providerId, { ...previous, ...patch });
+  updateLoadingOverlay();
+}
+
+// Mostra o overlay de carregamento sobre a área do provider que está
+// carregando (a metade correspondente no modo compare, a janela toda nos
+// modos simples), para o usuário não ver só uma tela preta.
+function updateLoadingOverlay() {
+  const overlay = chromeViews.get('loading');
+  if (!overlay || !mainWindow || mainWindow.isDestroyed()) {
+    return;
+  }
+
+  const visibleIds = mode === 'compare' ? ['chatgpt', 'grok'] : [mode];
+  const items = visibleIds
+    .map((id) => {
+      const status = providerLoading.get(id);
+      if (!status || (!status.loading && !status.error)) {
+        return null;
+      }
+      return {
+        id,
+        label: PROVIDERS[id]?.label || id,
+        loading: Boolean(status.loading),
+        error: status.error || null
+      };
+    })
+    .filter(Boolean);
+
+  if (!items.length || shellOverlayVisible) {
+    overlay.setVisible(false);
+    return;
+  }
+
+  const { x, y, width, height, dividerWidth, splitRatio } = layout;
+  let bounds = { x, y, width, height };
+
+  if (mode === 'compare' && items.length === 1) {
+    const usableWidth = Math.max(0, width - dividerWidth);
+    const leftWidth = Math.max(0, Math.round(usableWidth * splitRatio));
+    bounds = items[0].id === 'chatgpt'
+      ? { x, y, width: leftWidth, height }
+      : {
+          x: x + leftWidth + dividerWidth,
+          y,
+          width: Math.max(0, usableWidth - leftWidth),
+          height
+        };
+  }
+
+  setViewBounds(overlay, bounds);
+  overlay.setVisible(true);
+
+  if (!overlay.webContents.isLoading()) {
+    overlay.webContents.send('chatclient:loading-state', { items });
   }
 }
 
@@ -540,6 +685,7 @@ function configureProviderView(provider) {
   });
 
   contents.on('did-start-loading', () => {
+    setProviderLoading(provider.id, { loading: true, error: null });
     emitProviderStatus(provider.id, { loading: true });
   });
 
@@ -550,6 +696,7 @@ function configureProviderView(provider) {
       scheduleSessionSave();
     }
 
+    setProviderLoading(provider.id, { loading: false });
     emitProviderStatus(provider.id, {
       loading: false,
       url: currentUrl
@@ -568,6 +715,7 @@ function configureProviderView(provider) {
       return;
     }
 
+    setProviderLoading(provider.id, { loading: false, error: errorDescription });
     emitProviderStatus(provider.id, {
       loading: false,
       error: errorDescription,
@@ -587,8 +735,34 @@ function configureProviderView(provider) {
     });
   }
 
+  setProviderLoading(provider.id, { loading: true, error: null });
   contents.loadURL(providerUrls[provider.id] || provider.url);
   return view;
+}
+
+function ensureProviderView(providerId) {
+  const existing = providerViews.get(providerId);
+  if (existing && !existing.webContents.isDestroyed()) {
+    return existing;
+  }
+
+  const provider = PROVIDERS[providerId];
+  if (!provider || !mainWindow || mainWindow.isDestroyed()) {
+    return null;
+  }
+
+  const view = configureProviderView(provider);
+  providerViews.set(providerId, view);
+  // Índice 0 mantém provider views abaixo das chrome views (rail/toolbar).
+  mainWindow.contentView.addChildView(view, 0);
+  return view;
+}
+
+function ensureModeViews(targetMode) {
+  const ids = targetMode === 'compare' ? ['chatgpt', 'grok'] : [targetMode];
+  for (const providerId of ids) {
+    ensureProviderView(providerId);
+  }
 }
 
 function configureChromeView(name, fileName) {
@@ -615,6 +789,10 @@ function configureChromeView(name, fileName) {
       mode,
       quimeraAutoApproveEnabled,
       restoreWorkspaceEnabled
+    });
+    view.webContents.send('chatclient:chrome-state', {
+      railVisible,
+      toolbarVisible
     });
   });
 
@@ -664,15 +842,14 @@ function applyViewLayout() {
     return;
   }
 
+  updateLoadingOverlay();
+
   const chatgpt = providerViews.get('chatgpt');
   const grok = providerViews.get('grok');
-  if (!chatgpt || !grok) {
-    return;
-  }
 
   if (shellOverlayVisible) {
-    chatgpt.setVisible(false);
-    grok.setVisible(false);
+    chatgpt?.setVisible(false);
+    grok?.setVisible(false);
     return;
   }
 
@@ -682,10 +859,16 @@ function applyViewLayout() {
   const rightWidth = Math.max(0, usableWidth - leftWidth);
 
   if (mode === 'compare') {
+    if (!chatgpt || !grok) {
+      return;
+    }
+
     chatgpt.setVisible(true);
     grok.setVisible(true);
-    chatgpt.setBounds({ x, y, width: leftWidth, height });
-    grok.setBounds({
+    chatgpt.webContents.setAudioMuted(false);
+    grok.webContents.setAudioMuted(false);
+    setViewBounds(chatgpt, { x, y, width: leftWidth, height });
+    setViewBounds(grok, {
       x: x + leftWidth + dividerWidth,
       y,
       width: rightWidth,
@@ -697,9 +880,17 @@ function applyViewLayout() {
   const active = mode === 'grok' ? grok : chatgpt;
   const inactive = mode === 'grok' ? chatgpt : grok;
 
+  if (!active) {
+    return;
+  }
+
   active.setVisible(true);
-  inactive.setVisible(false);
-  active.setBounds({ x, y, width, height });
+  active.webContents.setAudioMuted(false);
+  if (inactive) {
+    inactive.setVisible(false);
+    inactive.webContents.setAudioMuted(true);
+  }
+  setViewBounds(active, { x, y, width, height });
 }
 
 function setMode(nextMode, notify = true) {
@@ -709,6 +900,7 @@ function setMode(nextMode, notify = true) {
 
   mode = nextMode;
   scheduleSessionSave();
+  ensureModeViews(mode);
   applyViewLayout();
 
   if (notify) {
@@ -799,6 +991,19 @@ function registerIpc() {
     applyChromeOverlayLayout();
   });
 
+  ipcMain.handle('chatclient:chrome-reveal', (_event, target) => {
+    const now = Date.now();
+    if (target === 'rail') {
+      railLastIntentAt = now;
+    } else if (target === 'toolbar') {
+      toolbarLastIntentAt = now;
+    }
+    setChromeVisibility(
+      now - railLastIntentAt < CHROME_REVEAL.hideDelayMs,
+      now - toolbarLastIntentAt < CHROME_REVEAL.hideDelayMs
+    );
+  });
+
   ipcMain.handle('chatclient:open-settings', () => {
     setChromeVisibility(false, false);
     mainWindow?.webContents.send('chatclient:open-settings');
@@ -827,16 +1032,20 @@ function createWindow() {
   layout.width = contentWidth;
   layout.height = contentHeight;
 
-  for (const provider of Object.values(PROVIDERS)) {
-    const view = configureProviderView(provider);
-    providerViews.set(provider.id, view);
-    mainWindow.contentView.addChildView(view);
-  }
+  // Só carrega os providers do modo atual; os demais são criados sob demanda.
+  ensureModeViews(mode);
 
+  const loadingView = configureChromeView('loading', 'chrome-loading.html');
   const railView = configureChromeView('rail', 'chrome-rail.html');
   const toolbarView = configureChromeView('toolbar', 'chrome-toolbar.html');
+  // Loading fica acima dos providers e abaixo do rail/toolbar.
+  mainWindow.contentView.addChildView(loadingView);
   mainWindow.contentView.addChildView(railView);
   mainWindow.contentView.addChildView(toolbarView);
+
+  loadingView.webContents.once('did-finish-load', () => {
+    updateLoadingOverlay();
+  });
 
   mainWindow.webContents.on('before-input-event', (event, input) => {
     if (handleShortcut(input)) {
@@ -860,7 +1069,11 @@ function createWindow() {
     applyChromeOverlayLayout();
     scheduleSessionSave();
   });
-  mainWindow.on('blur', () => setChromeVisibility(false, false));
+  mainWindow.on('blur', () => {
+    setChromeVisibility(false, false);
+    stopChromeHoverTracking();
+  });
+  mainWindow.on('focus', () => startChromeHoverTracking());
 
   mainWindow.on('close', () => {
     restoredWindowState = getPersistedWindowState();

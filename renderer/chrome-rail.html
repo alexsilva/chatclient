@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ChatClient Rail</title>
+  <link rel="stylesheet" href="chrome.css">
+</head>
+<body>
+  <aside class="rail-shell" aria-label="Provedores e modos">
+    <div class="brand" aria-label="ChatClient">C</div>
+    <nav class="rail-nav">
+      <button class="rail-button active" data-mode="chatgpt" title="ChatGPT (Alt+1)" aria-label="ChatGPT">◉</button>
+      <button class="rail-button" data-mode="grok" title="Grok (Alt+2)" aria-label="Grok">✦</button>
+      <button class="rail-button" data-mode="compare" title="Comparar (Alt+3)" aria-label="Comparar">⇄</button>
+    </nav>
+    <div class="spacer"></div>
+    <button class="rail-button" id="settingsButton" title="Configurações" aria-label="Configurações">⚙</button>
+  </aside>
+  <script src="chrome-rail.js"></script>
+</body>
+</html>

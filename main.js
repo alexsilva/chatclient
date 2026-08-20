@@ -2,7 +2,7 @@
  * ChatClient
  * Multi-provider Electron shell for ChatGPT and Grok.
  */
-const { app, BrowserWindow, WebContentsView, ipcMain, shell } = require('electron');
+const { app, BrowserWindow, WebContentsView, ipcMain, shell, screen } = require('electron');
 const { readFileSync } = require('node:fs');
 const { join } = require('node:path');
 
@@ -21,12 +21,23 @@ const PROVIDERS = {
 
 const MODES = new Set(['chatgpt', 'grok', 'compare']);
 const DEFAULT_LAYOUT = {
-  x: 48,
-  y: 54,
-  width: 1232,
-  height: 766,
+  x: 0,
+  y: 0,
+  width: 1280,
+  height: 820,
   dividerWidth: 10,
   splitRatio: 0.5
+};
+
+const CHROME_REVEAL = {
+  railWidth: 48,
+  toolbarWidth: 184,
+  toolbarHeight: 44,
+  toolbarInset: 8,
+  hotCornerSize: 28,
+  holdMargin: 18,
+  hideDelayMs: 650,
+  pollIntervalMs: 75
 };
 
 const QUIMERA_AUTO_APPROVE_SCRIPT = readFileSync(
@@ -36,10 +47,16 @@ const QUIMERA_AUTO_APPROVE_SCRIPT = readFileSync(
 
 let mainWindow = null;
 let providerViews = new Map();
+let chromeViews = new Map();
 let mode = 'chatgpt';
 let layout = { ...DEFAULT_LAYOUT };
 let quimeraAutoApproveEnabled = true;
 let shellOverlayVisible = false;
+let railVisible = false;
+let toolbarVisible = false;
+let chromeHoverInterval = null;
+let railLastIntentAt = 0;
+let toolbarLastIntentAt = 0;
 
 function safeRectangle(value) {
   return {
@@ -61,6 +78,154 @@ function emitState() {
     mode,
     quimeraAutoApproveEnabled
   });
+
+  for (const view of chromeViews.values()) {
+    if (!view.webContents.isDestroyed()) {
+      view.webContents.send('chatclient:state', {
+        mode,
+        quimeraAutoApproveEnabled
+      });
+    }
+  }
+}
+
+function emitChromeState() {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    return;
+  }
+
+  mainWindow.webContents.send('chatclient:chrome-state', {
+    railVisible,
+    toolbarVisible
+  });
+}
+
+function setChromeVisibility(nextRailVisible, nextToolbarVisible) {
+  const nextRail = Boolean(nextRailVisible);
+  const nextToolbar = Boolean(nextToolbarVisible);
+
+  if (railVisible === nextRail && toolbarVisible === nextToolbar) {
+    return;
+  }
+
+  railVisible = nextRail;
+  toolbarVisible = nextToolbar;
+  applyChromeOverlayLayout();
+  emitChromeState();
+}
+
+function applyChromeOverlayLayout() {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    return;
+  }
+
+  const rail = chromeViews.get('rail');
+  const toolbar = chromeViews.get('toolbar');
+  if (!rail || !toolbar) {
+    return;
+  }
+
+  const [width, height] = mainWindow.getContentSize();
+  const overlaysAllowed = !shellOverlayVisible;
+
+  rail.setBounds({
+    x: 0,
+    y: 0,
+    width: CHROME_REVEAL.railWidth,
+    height
+  });
+  rail.setVisible(overlaysAllowed && railVisible);
+
+  toolbar.setBounds({
+    x: Math.max(
+      0,
+      width - CHROME_REVEAL.toolbarWidth - CHROME_REVEAL.toolbarInset
+    ),
+    y: CHROME_REVEAL.toolbarInset,
+    width: CHROME_REVEAL.toolbarWidth,
+    height: CHROME_REVEAL.toolbarHeight
+  });
+  toolbar.setVisible(overlaysAllowed && toolbarVisible);
+}
+
+function pollChromeHover() {
+  if (!mainWindow || mainWindow.isDestroyed() || !mainWindow.isFocused()) {
+    setChromeVisibility(false, false);
+    return;
+  }
+
+  const bounds = mainWindow.getContentBounds();
+  const cursor = screen.getCursorScreenPoint();
+  const insideWindow =
+    cursor.x >= bounds.x &&
+    cursor.y >= bounds.y &&
+    cursor.x < bounds.x + bounds.width &&
+    cursor.y < bounds.y + bounds.height;
+
+  if (!insideWindow) {
+    const now = Date.now();
+    setChromeVisibility(
+      now - railLastIntentAt < CHROME_REVEAL.hideDelayMs,
+      now - toolbarLastIntentAt < CHROME_REVEAL.hideDelayMs
+    );
+    return;
+  }
+
+  const localX = cursor.x - bounds.x;
+  const localY = cursor.y - bounds.y;
+  const now = Date.now();
+
+  const inRailHotCorner =
+    localX <= CHROME_REVEAL.hotCornerSize &&
+    localY <= CHROME_REVEAL.hotCornerSize;
+  const inToolbarHotCorner =
+    localX >= bounds.width - CHROME_REVEAL.hotCornerSize &&
+    localY <= CHROME_REVEAL.hotCornerSize;
+
+  const insideVisibleRail =
+    railVisible &&
+    localX <= CHROME_REVEAL.railWidth + CHROME_REVEAL.holdMargin;
+  const insideVisibleToolbar =
+    toolbarVisible &&
+    localX >=
+      bounds.width -
+        CHROME_REVEAL.toolbarWidth -
+        CHROME_REVEAL.toolbarInset -
+        CHROME_REVEAL.holdMargin &&
+    localY <=
+      CHROME_REVEAL.toolbarHeight +
+        CHROME_REVEAL.toolbarInset +
+        CHROME_REVEAL.holdMargin;
+
+  if (inRailHotCorner || insideVisibleRail) {
+    railLastIntentAt = now;
+  }
+
+  if (inToolbarHotCorner || insideVisibleToolbar) {
+    toolbarLastIntentAt = now;
+  }
+
+  setChromeVisibility(
+    now - railLastIntentAt < CHROME_REVEAL.hideDelayMs,
+    now - toolbarLastIntentAt < CHROME_REVEAL.hideDelayMs
+  );
+}
+
+function startChromeHoverTracking() {
+  if (chromeHoverInterval) {
+    clearInterval(chromeHoverInterval);
+  }
+
+  railLastIntentAt = 0;
+  toolbarLastIntentAt = 0;
+  chromeHoverInterval = setInterval(pollChromeHover, CHROME_REVEAL.pollIntervalMs);
+}
+
+function stopChromeHoverTracking() {
+  if (chromeHoverInterval) {
+    clearInterval(chromeHoverInterval);
+    chromeHoverInterval = null;
+  }
 }
 
 function emitProviderStatus(providerId, patch) {
@@ -274,6 +439,37 @@ function configureProviderView(provider) {
   return view;
 }
 
+function configureChromeView(name, fileName) {
+  const view = new WebContentsView({
+    webPreferences: {
+      preload: join(__dirname, 'preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true
+    }
+  });
+
+  view.setBackgroundColor('#00000000');
+  view.setVisible(false);
+
+  view.webContents.on('before-input-event', (event, input) => {
+    if (handleShortcut(input)) {
+      event.preventDefault();
+    }
+  });
+
+  view.webContents.once('did-finish-load', () => {
+    view.webContents.send('chatclient:state', {
+      mode,
+      quimeraAutoApproveEnabled
+    });
+  });
+
+  view.webContents.loadFile(join(__dirname, 'renderer', fileName));
+  chromeViews.set(name, view);
+  return view;
+}
+
 function injectQuimeraAutoApprove() {
   const view = providerViews.get('chatgpt');
   if (!view || view.webContents.isDestroyed()) {
@@ -404,6 +600,8 @@ function registerIpc() {
   ipcMain.handle('chatclient:get-state', () => ({
     mode,
     quimeraAutoApproveEnabled,
+    railVisible,
+    toolbarVisible,
     providers: Object.values(PROVIDERS)
   }));
 
@@ -430,6 +628,12 @@ function registerIpc() {
   ipcMain.handle('chatclient:set-shell-overlay', (_event, visible) => {
     shellOverlayVisible = Boolean(visible);
     applyViewLayout();
+    applyChromeOverlayLayout();
+  });
+
+  ipcMain.handle('chatclient:open-settings', () => {
+    setChromeVisibility(false, false);
+    mainWindow?.webContents.send('chatclient:open-settings');
   });
 }
 
@@ -456,15 +660,30 @@ function createWindow() {
     mainWindow.contentView.addChildView(view);
   }
 
+  const railView = configureChromeView('rail', 'chrome-rail.html');
+  const toolbarView = configureChromeView('toolbar', 'chrome-toolbar.html');
+  mainWindow.contentView.addChildView(railView);
+  mainWindow.contentView.addChildView(toolbarView);
+
   mainWindow.webContents.on('before-input-event', (event, input) => {
     if (handleShortcut(input)) {
       event.preventDefault();
     }
   });
 
-  mainWindow.on('resize', applyViewLayout);
-  mainWindow.on('maximize', applyViewLayout);
-  mainWindow.on('unmaximize', applyViewLayout);
+  mainWindow.on('resize', () => {
+    applyViewLayout();
+    applyChromeOverlayLayout();
+  });
+  mainWindow.on('maximize', () => {
+    applyViewLayout();
+    applyChromeOverlayLayout();
+  });
+  mainWindow.on('unmaximize', () => {
+    applyViewLayout();
+    applyChromeOverlayLayout();
+  });
+  mainWindow.on('blur', () => setChromeVisibility(false, false));
 
   mainWindow.on('closed', () => {
     for (const view of providerViews.values()) {
@@ -474,15 +693,27 @@ function createWindow() {
     }
 
     providerViews = new Map();
+
+    for (const view of chromeViews.values()) {
+      if (!view.webContents.isDestroyed()) {
+        view.webContents.close();
+      }
+    }
+    chromeViews = new Map();
+
+    stopChromeHoverTracking();
     mainWindow = null;
   });
 
   mainWindow.loadFile(join(__dirname, 'renderer', 'index.html'));
   mainWindow.webContents.once('did-finish-load', () => {
     emitState();
+    emitChromeState();
   });
 
   applyViewLayout();
+  applyChromeOverlayLayout();
+  startChromeHoverTracking();
 }
 
 registerIpc();

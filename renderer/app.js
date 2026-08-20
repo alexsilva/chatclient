@@ -18,11 +18,15 @@
   const state = {
     mode: 'chatgpt',
     splitRatio: 0.5,
-    quimeraAutoApproveEnabled: true
+    quimeraAutoApproveEnabled: true,
+    railVisible: false,
+    toolbarVisible: false
   };
 
   let toastTimer = null;
   let dragging = false;
+  let previewRailTimer = null;
+  let previewToolbarTimer = null;
 
   function showToast(message) {
     toast.textContent = message;
@@ -33,6 +37,8 @@
 
   function renderState() {
     document.documentElement.dataset.mode = state.mode;
+    document.documentElement.dataset.railVisible = String(state.railVisible);
+    document.documentElement.dataset.toolbarVisible = String(state.toolbarVisible);
     for (const button of railButtons) {
       const active = button.dataset.mode === state.mode;
       button.classList.toggle('active', active);
@@ -62,6 +68,28 @@
     quimeraSwitch.setAttribute('aria-checked', String(state.quimeraAutoApproveEnabled));
 
     updateLayout();
+  }
+
+  function setPreviewChromeVisibility(kind, visible) {
+    if (kind === 'rail') {
+      state.railVisible = visible;
+    } else {
+      state.toolbarVisible = visible;
+    }
+    renderState();
+  }
+
+  function schedulePreviewHide(kind) {
+    const key = kind === 'rail' ? 'previewRailTimer' : 'previewToolbarTimer';
+    const currentTimer = kind === 'rail' ? previewRailTimer : previewToolbarTimer;
+    clearTimeout(currentTimer);
+
+    const timer = setTimeout(() => setPreviewChromeVisibility(kind, false), 650);
+    if (key === 'previewRailTimer') {
+      previewRailTimer = timer;
+    } else {
+      previewToolbarTimer = timer;
+    }
   }
 
   function getLayout() {
@@ -238,6 +266,10 @@
   });
 
   if (isElectron) {
+    bridge.onOpenSettings(() => {
+      openSettings();
+    });
+
     bridge.onState((nextState) => {
       Object.assign(state, nextState);
       renderState();
@@ -247,6 +279,12 @@
       if (status.error) {
         showToast(`${status.providerId === 'grok' ? 'Grok' : 'ChatGPT'}: ${status.error}`);
       }
+    });
+
+    bridge.onChromeState((chromeState) => {
+      state.railVisible = Boolean(chromeState.railVisible);
+      state.toolbarVisible = Boolean(chromeState.toolbarVisible);
+      renderState();
     });
 
     bridge.getState()
@@ -276,6 +314,28 @@
       </section>
     `;
     document.getElementById('viewSurface').appendChild(preview);
+
+    window.addEventListener('pointermove', (event) => {
+      const hotCornerSize = 28;
+
+      if (event.clientX <= hotCornerSize && event.clientY <= hotCornerSize) {
+        clearTimeout(previewRailTimer);
+        setPreviewChromeVisibility('rail', true);
+      } else if (state.railVisible && event.clientX > 66) {
+        schedulePreviewHide('rail');
+      }
+
+      if (
+        event.clientX >= window.innerWidth - hotCornerSize &&
+        event.clientY <= hotCornerSize
+      ) {
+        clearTimeout(previewToolbarTimer);
+        setPreviewChromeVisibility('toolbar', true);
+      } else if (state.toolbarVisible && event.clientY > 72) {
+        schedulePreviewHide('toolbar');
+      }
+    });
+
     renderState();
   }
 })();

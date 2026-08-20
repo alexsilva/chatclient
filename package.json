@@ -1,8 +1,7 @@
 {
-  "name": "chatgpt",
+  "name": "chatclient",
   "version": "1.0.1",
-  "description": "Linux-friendly Electron wrapper for ChatGPT",
-  "homepage": "https://chatgpt.com",
+  "description": "Linux-friendly multi-provider desktop client for ChatGPT and Grok",
   "main": "main.js",
   "author": {
     "name": "Stephan Coertzen",
@@ -16,6 +15,7 @@
   "scripts": {
     "start": "electron .",
     "dev": "electron .",
+    "preview": "node scripts/serve-renderer.js",
     "build:linux": "electron-builder --linux --publish never",
     "release:linux": "npm run build:linux"
   },
@@ -24,12 +24,14 @@
     "electron-builder": "^26.0.12"
   },
   "build": {
-    "appId": "com.local.chatgpt",
-    "productName": "ChatGPT",
+    "appId": "com.local.chatclient",
+    "productName": "ChatClient",
     "npmRebuild": false,
     "files": [
       "main.js",
       "preload.js",
+      "renderer/**/*",
+      "injections/**/*",
       "package.json"
     ],
     "linux": {
@@ -38,7 +40,7 @@
         "deb"
       ],
       "icon": "build/icons",
-      "executableName": "chatgpt",
+      "executableName": "chatclient",
       "maintainer": "Stephan Coertzen <coertzen.jfs@gmail.com>",
       "category": "Utility"
     }

@@ -1,323 +1,491 @@
 /*
- * ChatGPT Desktop Wrapper
- * Developer: Stephan Coertzen <coertzen.jfs@gmail.com>
- * License: MIT
+ * ChatClient
+ * Multi-provider Electron shell for ChatGPT and Grok.
  */
-const { app, BrowserWindow, shell } = require('electron');
+const { app, BrowserWindow, WebContentsView, ipcMain, shell } = require('electron');
+const { readFileSync } = require('node:fs');
+const { join } = require('node:path');
 
-const REFRESH_BUTTON_SCRIPT = `
-(() => {
-  const hostId = 'chatgpt-desktop-refresh-host';
+const PROVIDERS = {
+  chatgpt: {
+    id: 'chatgpt',
+    label: 'ChatGPT',
+    url: 'https://chatgpt.com'
+  },
+  grok: {
+    id: 'grok',
+    label: 'Grok',
+    url: 'https://grok.com/'
+  }
+};
 
-  if (document.getElementById(hostId)) {
+const MODES = new Set(['chatgpt', 'grok', 'compare']);
+const DEFAULT_LAYOUT = {
+  x: 48,
+  y: 54,
+  width: 1232,
+  height: 766,
+  dividerWidth: 10,
+  splitRatio: 0.5
+};
+
+const QUIMERA_AUTO_APPROVE_SCRIPT = readFileSync(
+  join(__dirname, 'injections', 'quimera-auto-approve.js'),
+  'utf8'
+);
+
+let mainWindow = null;
+let providerViews = new Map();
+let mode = 'chatgpt';
+let layout = { ...DEFAULT_LAYOUT };
+let quimeraAutoApproveEnabled = true;
+let shellOverlayVisible = false;
+
+function safeRectangle(value) {
+  return {
+    x: Math.max(0, Math.round(Number(value.x) || 0)),
+    y: Math.max(0, Math.round(Number(value.y) || 0)),
+    width: Math.max(0, Math.round(Number(value.width) || 0)),
+    height: Math.max(0, Math.round(Number(value.height) || 0)),
+    dividerWidth: Math.max(4, Math.round(Number(value.dividerWidth) || 10)),
+    splitRatio: Math.min(0.8, Math.max(0.2, Number(value.splitRatio) || 0.5))
+  };
+}
+
+function emitState() {
+  if (!mainWindow || mainWindow.isDestroyed()) {
     return;
   }
 
-  const host = document.createElement('div');
-  host.id = hostId;
-  host.style.position = 'fixed';
-  host.style.top = '12px';
-  host.style.right = '14px';
-  host.style.zIndex = '2147483647';
-
-  const shadow = host.attachShadow({ mode: 'closed' });
-  const style = document.createElement('style');
-  style.textContent = [
-    'button {',
-    '  align-items: center;',
-    '  background: rgba(255, 255, 255, 0.92);',
-    '  border: 1px solid rgba(0, 0, 0, 0.16);',
-    '  border-radius: 8px;',
-    '  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.16);',
-    '  color: #111827;',
-    '  cursor: pointer;',
-    '  display: inline-flex;',
-    '  height: 36px;',
-    '  justify-content: center;',
-    '  padding: 0;',
-    '  width: 36px;',
-    '}',
-    'button:hover { background: #ffffff; }',
-    'button:active { transform: translateY(1px); }',
-    'button:focus-visible { outline: 2px solid #2563eb; outline-offset: 2px; }',
-    'svg { height: 18px; width: 18px; }',
-    '@media (prefers-color-scheme: dark) {',
-    '  button {',
-    '    background: rgba(31, 41, 55, 0.92);',
-    '    border-color: rgba(255, 255, 255, 0.2);',
-    '    color: #f9fafb;',
-    '  }',
-    '  button:hover { background: #374151; }',
-    '}'
-  ].join('\\n');
-
-  const button = document.createElement('button');
-  button.type = 'button';
-  button.title = 'Refresh';
-  button.setAttribute('aria-label', 'Refresh ChatGPT');
-
-  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-  svg.setAttribute('viewBox', '0 0 24 24');
-  svg.setAttribute('fill', 'none');
-  svg.setAttribute('stroke', 'currentColor');
-  svg.setAttribute('stroke-width', '2');
-  svg.setAttribute('stroke-linecap', 'round');
-  svg.setAttribute('stroke-linejoin', 'round');
-
-  for (const d of ['M21 12a9 9 0 1 1-2.64-6.36', 'M21 3v6h-6']) {
-    const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
-    path.setAttribute('d', d);
-    svg.appendChild(path);
-  }
-
-  button.appendChild(svg);
-  button.addEventListener('click', () => {
-    window.location.reload();
+  mainWindow.webContents.send('chatclient:state', {
+    mode,
+    quimeraAutoApproveEnabled
   });
+}
 
-  shadow.append(style, button);
-  document.documentElement.appendChild(host);
-})();
-`;
-
-const QUIMERA_AUTO_APPROVE_SCRIPT = `
-(() => {
-  const hostId = 'chatgpt-desktop-quimera-autoapprove-host';
-
-  if (document.getElementById(hostId)) {
+function emitProviderStatus(providerId, patch) {
+  if (!mainWindow || mainWindow.isDestroyed()) {
     return;
   }
 
-  const TOOL_NAME = 'quimera';
-  const ALLOW_LABEL = 'permitir';
-  const PROMPT_PHRASE = 'permitir que';
-  const MAX_CONTAINER_TEXT_LENGTH = 6000;
-  const MAX_ANCESTOR_DEPTH = 14;
-  const CLICK_DELAY_MIN_MS = 400;
-  const CLICK_DELAY_MAX_MS = 900;
-  const LOG_PREFIX = '[quimera-autoapprove]';
-
-  let autoApproveEnabled = true;
-  const processedButtons = new WeakSet();
-  const loggedMismatches = new WeakSet();
-
-  const host = document.createElement('div');
-  host.id = hostId;
-  host.style.position = 'fixed';
-  host.style.top = '12px';
-  host.style.right = '58px';
-  host.style.zIndex = '2147483647';
-
-  const shadow = host.attachShadow({ mode: 'closed' });
-  const style = document.createElement('style');
-  style.textContent = [
-    'button {',
-    '  align-items: center;',
-    '  background: rgba(255, 255, 255, 0.92);',
-    '  border: 1px solid rgba(0, 0, 0, 0.16);',
-    '  border-radius: 8px;',
-    '  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.16);',
-    '  color: #111827;',
-    '  cursor: pointer;',
-    '  display: inline-flex;',
-    '  height: 36px;',
-    '  justify-content: center;',
-    '  padding: 0;',
-    '  width: 36px;',
-    '}',
-    'button:hover { background: #ffffff; }',
-    'button:active { transform: translateY(1px); }',
-    'button:focus-visible { outline: 2px solid #2563eb; outline-offset: 2px; }',
-    'svg { height: 18px; width: 18px; }',
-    '@media (prefers-color-scheme: dark) {',
-    '  button {',
-    '    background: rgba(31, 41, 55, 0.92);',
-    '    border-color: rgba(255, 255, 255, 0.2);',
-    '    color: #f9fafb;',
-    '  }',
-    '  button:hover { background: #374151; }',
-    '}',
-    'button.active { color: #16a34a; }',
-    'button.inactive { opacity: 0.5; }'
-  ].join('\\n');
-
-  const button = document.createElement('button');
-  button.type = 'button';
-
-  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-  svg.setAttribute('viewBox', '0 0 24 24');
-  svg.setAttribute('fill', 'none');
-  svg.setAttribute('stroke', 'currentColor');
-  svg.setAttribute('stroke-width', '2');
-  svg.setAttribute('stroke-linecap', 'round');
-  svg.setAttribute('stroke-linejoin', 'round');
-
-  for (const d of [
-    'M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z',
-    'M9 12l2 2 4-4'
-  ]) {
-    const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
-    path.setAttribute('d', d);
-    svg.appendChild(path);
-  }
-
-  button.appendChild(svg);
-
-  function render() {
-    const label = autoApproveEnabled
-      ? 'Auto-aprovar Quimera: ativado (clique para desativar)'
-      : 'Auto-aprovar Quimera: desativado (clique para ativar)';
-    button.title = label;
-    button.setAttribute('aria-label', label);
-    button.setAttribute('aria-pressed', String(autoApproveEnabled));
-    button.classList.toggle('active', autoApproveEnabled);
-    button.classList.toggle('inactive', !autoApproveEnabled);
-  }
-
-  button.addEventListener('click', () => {
-    autoApproveEnabled = !autoApproveEnabled;
-    render();
-  });
-
-  render();
-  shadow.append(style, button);
-  document.documentElement.appendChild(host);
-
-  function normalizedText(el) {
-    return (el.textContent || '').trim().toLowerCase();
-  }
-
-  function isDisabledCandidate(el) {
-    return el.disabled === true || el.getAttribute('aria-disabled') === 'true';
-  }
-
-  // Only clicks "Permitir" on prompts whose card text also names the Quimera
-  // tool, so unrelated connector/tool approval prompts still require a human.
-  function findQuimeraContainer(el) {
-    let container = el;
-    const chain = [];
-    for (let depth = 0; depth < MAX_ANCESTOR_DEPTH && container; depth += 1) {
-      const text = normalizedText(container);
-      chain.push(text.length);
-      if (text.length <= MAX_CONTAINER_TEXT_LENGTH && text.includes(TOOL_NAME) && text.includes(PROMPT_PHRASE)) {
-        return { container, depth, chain };
-      }
-      container = container.parentElement;
-    }
-    return null;
-  }
-
-  function scanAndApprove() {
-    if (!autoApproveEnabled) {
-      return;
-    }
-
-    const candidates = document.querySelectorAll('button, [role="button"]');
-    for (const candidate of candidates) {
-      if (processedButtons.has(candidate)) {
-        continue;
-      }
-      if (normalizedText(candidate) !== ALLOW_LABEL) {
-        continue;
-      }
-
-      const match = findQuimeraContainer(candidate);
-      if (!match) {
-        if (!loggedMismatches.has(candidate)) {
-          loggedMismatches.add(candidate);
-          console.info(LOG_PREFIX, 'botao "Permitir" encontrado, mas nenhum ancestral ate profundidade',
-            MAX_ANCESTOR_DEPTH, 'contem "quimera" + "permitir que". Elemento:', candidate);
-        }
-        continue;
-      }
-
-      if (isDisabledCandidate(candidate)) {
-        console.info(LOG_PREFIX, 'botao "Permitir" da Quimera encontrado mas esta desabilitado, aguardando proxima varredura.', candidate);
-        continue;
-      }
-
-      processedButtons.add(candidate);
-      const delayMs = CLICK_DELAY_MIN_MS + Math.random() * (CLICK_DELAY_MAX_MS - CLICK_DELAY_MIN_MS);
-      console.info(LOG_PREFIX, 'botao "Permitir" da Quimera encontrado (profundidade', match.depth,
-        '), clicando em', Math.round(delayMs), 'ms.', candidate);
-
-      setTimeout(() => {
-        if (!autoApproveEnabled || !candidate.isConnected || isDisabledCandidate(candidate)) {
-          console.info(LOG_PREFIX, 'clique cancelado (desativado, removido do DOM ou desabilitado novamente).', candidate);
-          return;
-        }
-        console.info(LOG_PREFIX, 'clicando em "Permitir" da Quimera.', candidate);
-        candidate.click();
-      }, delayMs);
-    }
-  }
-
-  let scanScheduled = false;
-  function scheduleScan() {
-    if (scanScheduled) {
-      return;
-    }
-    scanScheduled = true;
-    requestAnimationFrame(() => {
-      scanScheduled = false;
-      scanAndApprove();
-    });
-  }
-
-  const observer = new MutationObserver(scheduleScan);
-  observer.observe(document.body, { childList: true, subtree: true });
-  scheduleScan();
-
-  console.info(LOG_PREFIX, 'script injetado e observando o DOM.');
-})();
-`;
-
-function injectRefreshButton(win) {
-  win.webContents.executeJavaScript(REFRESH_BUTTON_SCRIPT).catch(() => {
-    // The page can briefly reject injection while navigating; the next load retries it.
+  mainWindow.webContents.send('chatclient:provider-status', {
+    providerId,
+    ...patch
   });
 }
 
-function injectQuimeraAutoApprove(win) {
-  win.webContents.executeJavaScript(QUIMERA_AUTO_APPROVE_SCRIPT).catch(() => {
-    // The page can briefly reject injection while navigating; the next load retries it.
-  });
+function isTrustedProviderUrl(providerId, url) {
+  try {
+    const hostname = new URL(url).hostname;
+
+    if (providerId === 'chatgpt') {
+      return hostname === 'chatgpt.com' || hostname.endsWith('.chatgpt.com') ||
+        hostname === 'openai.com' || hostname.endsWith('.openai.com');
+    }
+
+    if (providerId === 'grok') {
+      return hostname === 'grok.com' || hostname.endsWith('.grok.com') ||
+        hostname === 'x.ai' || hostname.endsWith('.x.ai');
+    }
+  } catch {
+    return false;
+  }
+
+  return false;
 }
 
-function createWindow() {
-  const win = new BrowserWindow({
-    width: 1280,
-    height: 820,
-    minWidth: 980,
-    minHeight: 640,
+function isAuthenticationPopupUrl(providerId, url) {
+  if (!url || url.startsWith('about:blank')) {
+    return true;
+  }
+
+  if (isTrustedProviderUrl(providerId, url)) {
+    return true;
+  }
+
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol !== 'https:') {
+      return false;
+    }
+
+    const hostname = parsed.hostname;
+    const authenticationHosts = [
+      'accounts.google.com',
+      'appleid.apple.com',
+      'login.microsoftonline.com',
+      'login.live.com',
+      'github.com',
+      'x.com',
+      'twitter.com'
+    ];
+
+    return authenticationHosts.some(
+      (host) => hostname === host || hostname.endsWith(`.${host}`)
+    );
+  } catch {
+    return false;
+  }
+}
+
+function isManagedPopupNavigationUrl(url) {
+  if (!url || url.startsWith('about:blank')) {
+    return true;
+  }
+
+  try {
+    const parsed = new URL(url);
+
+    if (parsed.protocol === 'https:') {
+      return true;
+    }
+
+    if (parsed.protocol !== 'http:') {
+      return false;
+    }
+
+    return ['localhost', '127.0.0.1', '[::1]'].includes(parsed.hostname);
+  } catch {
+    return false;
+  }
+}
+
+function managedPopupOptions(provider) {
+  return {
+    parent: mainWindow,
+    modal: false,
+    width: 520,
+    height: 720,
+    minWidth: 420,
+    minHeight: 560,
+    show: true,
     autoHideMenuBar: true,
+    backgroundColor: '#11151a',
+    title: `Entrar em ${provider.label} - ChatClient`
+  };
+}
+
+function configureManagedPopup(childWindow, provider) {
+  childWindow.setMenuBarVisibility(false);
+  childWindow.setTitle(`Entrar em ${provider.label} - ChatClient`);
+  childWindow.center();
+  childWindow.focus();
+
+  childWindow.webContents.setWindowOpenHandler(({ url }) => {
+    if (isManagedPopupNavigationUrl(url)) {
+      return {
+        action: 'allow',
+        overrideBrowserWindowOptions: managedPopupOptions(provider)
+      };
+    }
+
+    shell.openExternal(url).catch(() => {});
+    return { action: 'deny' };
+  });
+
+  childWindow.webContents.on('did-create-window', (nestedWindow) => {
+    configureManagedPopup(nestedWindow, provider);
+  });
+
+  childWindow.webContents.on('will-navigate', (event, url) => {
+    if (isManagedPopupNavigationUrl(url)) {
+      return;
+    }
+
+    event.preventDefault();
+    shell.openExternal(url).catch(() => {});
+  });
+}
+
+function configureProviderView(provider) {
+  const view = new WebContentsView({
     webPreferences: {
-      preload: require('path').join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true
     }
   });
 
-  win.webContents.setWindowOpenHandler(({ url }) => {
-    shell.openExternal(url);
+  view.setBackgroundColor('#0f1115');
+
+  const contents = view.webContents;
+
+  contents.setWindowOpenHandler(({ url }) => {
+    if (isManagedPopupNavigationUrl(url)) {
+      return {
+        action: 'allow',
+        overrideBrowserWindowOptions: managedPopupOptions(provider)
+      };
+    }
+
+    shell.openExternal(url).catch(() => {});
     return { action: 'deny' };
   });
 
-  win.webContents.on('before-input-event', (event, input) => {
-    if (input.type === 'keyDown' && input.key === 'F5') {
+  contents.on('did-create-window', (childWindow) => {
+    configureManagedPopup(childWindow, provider);
+  });
+
+  contents.on('will-navigate', (event, url) => {
+    if (isAuthenticationPopupUrl(provider.id, url)) {
+      return;
+    }
+
+    event.preventDefault();
+    shell.openExternal(url).catch(() => {});
+  });
+
+  contents.on('did-start-loading', () => {
+    emitProviderStatus(provider.id, { loading: true });
+  });
+
+  contents.on('did-stop-loading', () => {
+    emitProviderStatus(provider.id, {
+      loading: false,
+      url: contents.getURL()
+    });
+  });
+
+  contents.on('did-fail-load', (_event, errorCode, errorDescription, validatedURL, isMainFrame) => {
+    if (!isMainFrame || errorCode === -3) {
+      return;
+    }
+
+    emitProviderStatus(provider.id, {
+      loading: false,
+      error: errorDescription,
+      url: validatedURL
+    });
+  });
+
+  contents.on('before-input-event', (event, input) => {
+    if (handleShortcut(input)) {
       event.preventDefault();
-      win.webContents.reload();
     }
   });
 
-  win.webContents.on('dom-ready', () => {
-    injectRefreshButton(win);
-    injectQuimeraAutoApprove(win);
+  if (provider.id === 'chatgpt') {
+    contents.on('dom-ready', () => {
+      injectQuimeraAutoApprove();
+    });
+  }
+
+  contents.loadURL(provider.url);
+  return view;
+}
+
+function injectQuimeraAutoApprove() {
+  const view = providerViews.get('chatgpt');
+  if (!view || view.webContents.isDestroyed()) {
+    return;
+  }
+
+  view.webContents.executeJavaScript(QUIMERA_AUTO_APPROVE_SCRIPT)
+    .then(() => setQuimeraAutoApprove(quimeraAutoApproveEnabled, false))
+    .catch(() => {
+      // Navigation can briefly make the renderer unavailable; dom-ready retries it.
+    });
+}
+
+function setQuimeraAutoApprove(enabled, notify = true) {
+  quimeraAutoApproveEnabled = Boolean(enabled);
+
+  const view = providerViews.get('chatgpt');
+  if (view && !view.webContents.isDestroyed()) {
+    const serialized = JSON.stringify(quimeraAutoApproveEnabled);
+    view.webContents.executeJavaScript(
+      `window.__chatClientQuimeraAutoApprove?.setEnabled(${serialized});`
+    ).catch(() => {});
+  }
+
+  if (notify) {
+    emitState();
+  }
+}
+
+function applyViewLayout() {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    return;
+  }
+
+  const chatgpt = providerViews.get('chatgpt');
+  const grok = providerViews.get('grok');
+  if (!chatgpt || !grok) {
+    return;
+  }
+
+  if (shellOverlayVisible) {
+    chatgpt.setVisible(false);
+    grok.setVisible(false);
+    return;
+  }
+
+  const { x, y, width, height, dividerWidth, splitRatio } = layout;
+  const usableWidth = Math.max(0, width - dividerWidth);
+  const leftWidth = Math.max(0, Math.round(usableWidth * splitRatio));
+  const rightWidth = Math.max(0, usableWidth - leftWidth);
+
+  if (mode === 'compare') {
+    chatgpt.setVisible(true);
+    grok.setVisible(true);
+    chatgpt.setBounds({ x, y, width: leftWidth, height });
+    grok.setBounds({
+      x: x + leftWidth + dividerWidth,
+      y,
+      width: rightWidth,
+      height
+    });
+    return;
+  }
+
+  const active = mode === 'grok' ? grok : chatgpt;
+  const inactive = mode === 'grok' ? chatgpt : grok;
+
+  active.setVisible(true);
+  inactive.setVisible(false);
+  active.setBounds({ x, y, width, height });
+}
+
+function setMode(nextMode, notify = true) {
+  if (!MODES.has(nextMode)) {
+    return false;
+  }
+
+  mode = nextMode;
+  applyViewLayout();
+
+  if (notify) {
+    emitState();
+  }
+
+  return true;
+}
+
+function refreshCurrentMode() {
+  const ids = mode === 'compare' ? ['chatgpt', 'grok'] : [mode];
+
+  for (const providerId of ids) {
+    const view = providerViews.get(providerId);
+    if (view && !view.webContents.isDestroyed()) {
+      view.webContents.reload();
+    }
+  }
+}
+
+function handleShortcut(input) {
+  if (input.type !== 'keyDown') {
+    return false;
+  }
+
+  if (input.key === 'F5' || ((input.control || input.meta) && input.key.toLowerCase() === 'r')) {
+    refreshCurrentMode();
+    return true;
+  }
+
+  if (input.alt && input.key === '1') {
+    setMode('chatgpt');
+    return true;
+  }
+
+  if (input.alt && input.key === '2') {
+    setMode('grok');
+    return true;
+  }
+
+  if (input.alt && input.key === '3') {
+    setMode('compare');
+    return true;
+  }
+
+  return false;
+}
+
+function registerIpc() {
+  ipcMain.handle('chatclient:get-state', () => ({
+    mode,
+    quimeraAutoApproveEnabled,
+    providers: Object.values(PROVIDERS)
+  }));
+
+  ipcMain.handle('chatclient:set-mode', (_event, nextMode) => {
+    setMode(nextMode);
+    return { mode };
   });
 
-  win.loadURL('https://chatgpt.com');
+  ipcMain.handle('chatclient:update-layout', (_event, nextLayout) => {
+    layout = safeRectangle(nextLayout);
+    applyViewLayout();
+    return layout;
+  });
+
+  ipcMain.handle('chatclient:refresh', () => {
+    refreshCurrentMode();
+  });
+
+  ipcMain.handle('chatclient:set-quimera-auto-approve', (_event, enabled) => {
+    setQuimeraAutoApprove(enabled);
+    return { enabled: quimeraAutoApproveEnabled };
+  });
+
+  ipcMain.handle('chatclient:set-shell-overlay', (_event, visible) => {
+    shellOverlayVisible = Boolean(visible);
+    applyViewLayout();
+  });
 }
+
+function createWindow() {
+  mainWindow = new BrowserWindow({
+    width: 1280,
+    height: 820,
+    minWidth: 980,
+    minHeight: 640,
+    autoHideMenuBar: true,
+    backgroundColor: '#11151a',
+    title: 'ChatClient',
+    webPreferences: {
+      preload: join(__dirname, 'preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true
+    }
+  });
+
+  for (const provider of Object.values(PROVIDERS)) {
+    const view = configureProviderView(provider);
+    providerViews.set(provider.id, view);
+    mainWindow.contentView.addChildView(view);
+  }
+
+  mainWindow.webContents.on('before-input-event', (event, input) => {
+    if (handleShortcut(input)) {
+      event.preventDefault();
+    }
+  });
+
+  mainWindow.on('resize', applyViewLayout);
+  mainWindow.on('maximize', applyViewLayout);
+  mainWindow.on('unmaximize', applyViewLayout);
+
+  mainWindow.on('closed', () => {
+    for (const view of providerViews.values()) {
+      if (!view.webContents.isDestroyed()) {
+        view.webContents.close();
+      }
+    }
+
+    providerViews = new Map();
+    mainWindow = null;
+  });
+
+  mainWindow.loadFile(join(__dirname, 'renderer', 'index.html'));
+  mainWindow.webContents.once('did-finish-load', () => {
+    emitState();
+  });
+
+  applyViewLayout();
+}
+
+registerIpc();
 
 app.whenReady().then(() => {
   createWindow();

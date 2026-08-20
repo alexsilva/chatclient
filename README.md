@@ -1,47 +1,89 @@
-# ChatGPT Electron Wrapper (Ubuntu/Linux)
+# ChatClient
 
-A native Electron desktop wrapper that opens ChatGPT in an app window.
+Cliente desktop Electron para usar múltiplos provedores de IA em uma única interface. A primeira versão multi-provider mantém ChatGPT e Grok carregados em `WebContentsView` independentes e persistentes.
 
-## Developer
+## Interface
 
-- Stephan Coertzen `<coertzen.jfs@gmail.com>`
+O shell do ChatClient fornece três modos principais:
 
-## Prerequisites (Ubuntu)
+- **ChatGPT** — exibe `https://chatgpt.com`.
+- **Grok** — exibe `https://grok.com/`.
+- **Comparar** — exibe os dois provedores lado a lado com divisor ajustável.
 
-```bash
-sudo apt update
-sudo apt install -y libnss3 libatk-bridge2.0-0 libgtk-3-0 libxss1 libasound2
-```
+Os provedores permanecem vivos ao alternar entre os modos, evitando reload desnecessário e preservando a sessão de cada serviço.
 
-## Install
+### Atalhos
+
+- `Alt+1`: ChatGPT
+- `Alt+2`: Grok
+- `Alt+3`: Comparar
+- `F5` ou `Ctrl+R`: recarrega o provedor ativo; no modo Comparar recarrega ambos
+
+## Quimera
+
+O ChatClient mantém a automação de auto-aprovação da Quimera para o ChatGPT. O controle visual fica no shell do aplicativo, enquanto a automação é injetada apenas no `WebContentsView` do ChatGPT.
+
+O toggle também está disponível em **Configurações**.
+
+## Desenvolvimento
+
+### Pré-requisitos
+
+- Node.js 20+
+- npm
+- bibliotecas de runtime exigidas pelo Electron na distribuição Linux usada
+
+### Instalar
 
 ```bash
 npm install
 ```
 
-## Run the app
+### Executar o aplicativo
 
 ```bash
 npm start
 ```
 
-## Build Linux packages
+### Prévia do shell no navegador
+
+A interface própria do ChatClient pode ser testada isoladamente sem abrir os provedores reais:
+
+```bash
+npm run preview
+```
+
+Abra `http://127.0.0.1:4173`.
+
+No modo de prévia, placeholders representam os `WebContentsView` de ChatGPT e Grok. Isso permite validar layout, responsividade e interações do shell diretamente no browser.
+
+## Build Linux
 
 ```bash
 npm run build:linux
 ```
 
-Build outputs are generated in `dist/`:
-- `.AppImage`
+Os artefatos são gerados em `dist/`:
+
+- AppImage
 - `.deb`
 
-## GitHub Release Flow
+## Arquitetura
 
-Pushing a version tag (for example `v1.0.1`) triggers automated Linux builds and publishes a GitHub Release with attached artifacts. The release page notes are generated from every commit after `releaseNotes.fromHash` in `package.json`.
-
-```bash
-git add .
-git commit -m "release: v1.0.1"
-git tag v1.0.1
-git push origin main --tags
+```text
+BrowserWindow
+├── renderer/                  # shell do ChatClient
+│   ├── index.html
+│   ├── styles.css
+│   └── app.js
+├── WebContentsView: ChatGPT
+│   └── https://chatgpt.com
+└── WebContentsView: Grok
+    └── https://grok.com/
 ```
+
+`main.js` controla ciclo de vida, navegação e layout dos provedores. `preload.js` expõe apenas a ponte IPC necessária ao shell. Scripts específicos de páginas ficam em `injections/`.
+
+## Release
+
+Tags no formato `v*` acionam o workflow de release no GitHub Actions. As notas são geradas a partir dos commits posteriores ao hash configurado em `package.json`.

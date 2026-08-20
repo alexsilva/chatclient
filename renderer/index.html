@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ChatClient</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="rail" aria-label="Provedores e modos">
+      <div class="brand" aria-label="ChatClient">C</div>
+
+      <nav class="rail-nav">
+        <button class="rail-button active" data-mode="chatgpt" title="ChatGPT (Alt+1)" aria-label="ChatGPT">
+          <span class="provider-mark">◉</span>
+        </button>
+        <button class="rail-button" data-mode="grok" title="Grok (Alt+2)" aria-label="Grok">
+          <span class="provider-mark">✦</span>
+        </button>
+        <button class="rail-button" data-mode="compare" title="Comparar (Alt+3)" aria-label="Comparar ChatGPT e Grok">
+          <span class="provider-mark">⇄</span>
+        </button>
+      </nav>
+
+      <div class="rail-spacer"></div>
+
+      <button class="rail-button" id="settingsButton" title="Configurações" aria-label="Configurações">
+        <span class="provider-mark">⚙</span>
+      </button>
+    </aside>
+
+    <header class="toolbar">
+      <div class="toolbar-title-group">
+        <span class="toolbar-title">ChatClient</span>
+        <span class="toolbar-context" id="modeLabel">ChatGPT</span>
+      </div>
+
+      <div class="toolbar-actions">
+        <button class="tool-button active" id="quimeraButton" aria-pressed="true" title="Auto-aprovar Quimera">
+          <span>🛡</span>
+          <span class="tool-label">Quimera</span>
+        </button>
+        <button class="tool-button icon-only" id="refreshButton" title="Recarregar (F5)" aria-label="Recarregar">
+          ↻
+        </button>
+      </div>
+    </header>
+
+    <main class="content-frame" id="contentFrame" aria-label="Área dos provedores">
+      <div class="provider-header compare-only" id="compareHeader" aria-hidden="true">
+        <div class="provider-header-cell">◉ ChatGPT</div>
+        <div class="provider-header-cell">✦ Grok</div>
+      </div>
+      <div class="view-surface" id="viewSurface"></div>
+      <div class="compare-divider" id="compareDivider" aria-hidden="true" role="separator" aria-orientation="vertical" tabindex="0">
+        <div class="divider-grip"></div>
+      </div>
+    </main>
+
+    <section class="settings-panel" id="settingsPanel" aria-hidden="true">
+      <div class="settings-card">
+        <div class="settings-header">
+          <div>
+            <div class="eyebrow">ChatClient</div>
+            <h2>Configurações</h2>
+          </div>
+          <button class="close-button" id="closeSettingsButton" aria-label="Fechar configurações">×</button>
+        </div>
+        <div class="setting-row">
+          <div>
+            <strong>Auto-aprovar Quimera</strong>
+            <p>Aplica a automação somente aos prompts de permissão identificados como Quimera no ChatGPT.</p>
+          </div>
+          <button class="switch active" id="quimeraSwitch" role="switch" aria-checked="true"><span></span></button>
+        </div>
+        <div class="shortcut-list">
+          <div><kbd>Alt</kbd> + <kbd>1</kbd><span>ChatGPT</span></div>
+          <div><kbd>Alt</kbd> + <kbd>2</kbd><span>Grok</span></div>
+          <div><kbd>Alt</kbd> + <kbd>3</kbd><span>Comparar</span></div>
+          <div><kbd>F5</kbd><span>Recarregar modo atual</span></div>
+        </div>
+      </div>
+    </section>
+
+    <div class="toast" id="toast" role="status" aria-live="polite"></div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

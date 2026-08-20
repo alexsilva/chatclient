@@ -11,6 +11,8 @@ contextBridge.exposeInMainWorld('chatClient', {
   openSettings: () => ipcRenderer.invoke('chatclient:open-settings'),
   setQuimeraAutoApprove: (enabled) =>
     ipcRenderer.invoke('chatclient:set-quimera-auto-approve', enabled),
+  setRestoreWorkspace: (enabled) =>
+    ipcRenderer.invoke('chatclient:set-restore-workspace', enabled),
   setShellOverlay: (visible) => ipcRenderer.invoke('chatclient:set-shell-overlay', visible),
   onState: (callback) => {
     const listener = (_event, state) => callback(state);

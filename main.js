@@ -3,7 +3,12 @@
  * Multi-provider Electron shell for ChatGPT and Grok.
  */
 const { app, BrowserWindow, WebContentsView, ipcMain, shell, screen } = require('electron');
-const { readFileSync } = require('node:fs');
+const {
+  readFileSync,
+  writeFileSync,
+  renameSync,
+  mkdirSync
+} = require('node:fs');
 const { join } = require('node:path');
 
 const PROVIDERS = {
@@ -57,6 +62,138 @@ let toolbarVisible = false;
 let chromeHoverInterval = null;
 let railLastIntentAt = 0;
 let toolbarLastIntentAt = 0;
+let sessionStatePath = null;
+let sessionSaveTimer = null;
+let restoredWindowState = null;
+let restoreWorkspaceEnabled = true;
+let providerUrls = Object.fromEntries(
+  Object.values(PROVIDERS).map((provider) => [provider.id, provider.url])
+);
+
+function loadSessionState() {
+  sessionStatePath = join(app.getPath('userData'), 'session-state.json');
+
+  try {
+    const saved = JSON.parse(readFileSync(sessionStatePath, 'utf8'));
+
+    if (typeof saved.restoreWorkspaceEnabled === 'boolean') {
+      restoreWorkspaceEnabled = saved.restoreWorkspaceEnabled;
+    }
+
+    if (typeof saved.quimeraAutoApproveEnabled === 'boolean') {
+      quimeraAutoApproveEnabled = saved.quimeraAutoApproveEnabled;
+    }
+
+    if (!restoreWorkspaceEnabled) {
+      return;
+    }
+
+    if (MODES.has(saved.mode)) {
+      mode = saved.mode;
+    }
+
+    if (Number.isFinite(saved.splitRatio)) {
+      layout.splitRatio = Math.min(0.8, Math.max(0.2, saved.splitRatio));
+    }
+
+    if (saved.providers && typeof saved.providers === 'object') {
+      for (const provider of Object.values(PROVIDERS)) {
+        const savedUrl = saved.providers[provider.id];
+        if (typeof savedUrl === 'string' && isTrustedProviderUrl(provider.id, savedUrl)) {
+          providerUrls[provider.id] = savedUrl;
+        }
+      }
+    }
+
+    if (saved.window && typeof saved.window === 'object') {
+      restoredWindowState = saved.window;
+    }
+  } catch (error) {
+    if (error?.code !== 'ENOENT') {
+      console.warn('[chatclient] Não foi possível restaurar a sessão:', error.message);
+    }
+  }
+}
+
+function getPersistedWindowState() {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    return restoredWindowState;
+  }
+
+  const normalBounds = mainWindow.getNormalBounds();
+  return {
+    ...normalBounds,
+    maximized: mainWindow.isMaximized()
+  };
+}
+
+function buildSessionState() {
+  return {
+    version: 1,
+    restoreWorkspaceEnabled,
+    mode,
+    splitRatio: layout.splitRatio,
+    quimeraAutoApproveEnabled,
+    providers: { ...providerUrls },
+    window: getPersistedWindowState()
+  };
+}
+
+function saveSessionStateNow() {
+  if (!sessionStatePath) {
+    return;
+  }
+
+  try {
+    mkdirSync(app.getPath('userData'), { recursive: true });
+    const tempPath = `${sessionStatePath}.tmp`;
+    writeFileSync(tempPath, `${JSON.stringify(buildSessionState(), null, 2)}\n`, 'utf8');
+    renameSync(tempPath, sessionStatePath);
+  } catch (error) {
+    console.warn('[chatclient] Não foi possível salvar a sessão:', error.message);
+  }
+}
+
+function scheduleSessionSave(delayMs = 250) {
+  clearTimeout(sessionSaveTimer);
+  sessionSaveTimer = setTimeout(() => {
+    sessionSaveTimer = null;
+    saveSessionStateNow();
+  }, delayMs);
+}
+
+function getRestoredWindowOptions() {
+  const fallback = { width: 1280, height: 820 };
+  const saved = restoredWindowState;
+
+  if (!saved || !Number.isFinite(saved.width) || !Number.isFinite(saved.height)) {
+    return fallback;
+  }
+
+  const width = Math.max(980, Math.round(saved.width));
+  const height = Math.max(640, Math.round(saved.height));
+
+  if (!Number.isFinite(saved.x) || !Number.isFinite(saved.y)) {
+    return { width, height };
+  }
+
+  const candidate = {
+    x: Math.round(saved.x),
+    y: Math.round(saved.y),
+    width,
+    height
+  };
+  const display = screen.getDisplayMatching(candidate);
+  const workArea = display.workArea;
+
+  const visible =
+    candidate.x < workArea.x + workArea.width &&
+    candidate.y < workArea.y + workArea.height &&
+    candidate.x + candidate.width > workArea.x &&
+    candidate.y + candidate.height > workArea.y;
+
+  return visible ? candidate : { width, height };
+}
 
 function safeRectangle(value) {
   return {
@@ -76,14 +213,16 @@ function emitState() {
 
   mainWindow.webContents.send('chatclient:state', {
     mode,
-    quimeraAutoApproveEnabled
+    quimeraAutoApproveEnabled,
+    restoreWorkspaceEnabled
   });
 
   for (const view of chromeViews.values()) {
     if (!view.webContents.isDestroyed()) {
       view.webContents.send('chatclient:state', {
         mode,
-        quimeraAutoApproveEnabled
+        quimeraAutoApproveEnabled,
+        restoreWorkspaceEnabled
       });
     }
   }
@@ -405,10 +544,23 @@ function configureProviderView(provider) {
   });
 
   contents.on('did-stop-loading', () => {
+    const currentUrl = contents.getURL();
+    if (isTrustedProviderUrl(provider.id, currentUrl)) {
+      providerUrls[provider.id] = currentUrl;
+      scheduleSessionSave();
+    }
+
     emitProviderStatus(provider.id, {
       loading: false,
-      url: contents.getURL()
+      url: currentUrl
     });
+  });
+
+  contents.on('did-navigate-in-page', (_event, url, isMainFrame) => {
+    if (isMainFrame && isTrustedProviderUrl(provider.id, url)) {
+      providerUrls[provider.id] = url;
+      scheduleSessionSave();
+    }
   });
 
   contents.on('did-fail-load', (_event, errorCode, errorDescription, validatedURL, isMainFrame) => {
@@ -435,7 +587,7 @@ function configureProviderView(provider) {
     });
   }
 
-  contents.loadURL(provider.url);
+  contents.loadURL(providerUrls[provider.id] || provider.url);
   return view;
 }
 
@@ -461,7 +613,8 @@ function configureChromeView(name, fileName) {
   view.webContents.once('did-finish-load', () => {
     view.webContents.send('chatclient:state', {
       mode,
-      quimeraAutoApproveEnabled
+      quimeraAutoApproveEnabled,
+      restoreWorkspaceEnabled
     });
   });
 
@@ -485,6 +638,7 @@ function injectQuimeraAutoApprove() {
 
 function setQuimeraAutoApprove(enabled, notify = true) {
   quimeraAutoApproveEnabled = Boolean(enabled);
+  scheduleSessionSave();
 
   const view = providerViews.get('chatgpt');
   if (view && !view.webContents.isDestroyed()) {
@@ -497,6 +651,12 @@ function setQuimeraAutoApprove(enabled, notify = true) {
   if (notify) {
     emitState();
   }
+}
+
+function setRestoreWorkspaceEnabled(enabled) {
+  restoreWorkspaceEnabled = Boolean(enabled);
+  scheduleSessionSave();
+  emitState();
 }
 
 function applyViewLayout() {
@@ -548,6 +708,7 @@ function setMode(nextMode, notify = true) {
   }
 
   mode = nextMode;
+  scheduleSessionSave();
   applyViewLayout();
 
   if (notify) {
@@ -600,6 +761,7 @@ function registerIpc() {
   ipcMain.handle('chatclient:get-state', () => ({
     mode,
     quimeraAutoApproveEnabled,
+    restoreWorkspaceEnabled,
     railVisible,
     toolbarVisible,
     providers: Object.values(PROVIDERS)
@@ -612,6 +774,7 @@ function registerIpc() {
 
   ipcMain.handle('chatclient:update-layout', (_event, nextLayout) => {
     layout = safeRectangle(nextLayout);
+    scheduleSessionSave();
     applyViewLayout();
     return layout;
   });
@@ -623,6 +786,11 @@ function registerIpc() {
   ipcMain.handle('chatclient:set-quimera-auto-approve', (_event, enabled) => {
     setQuimeraAutoApprove(enabled);
     return { enabled: quimeraAutoApproveEnabled };
+  });
+
+  ipcMain.handle('chatclient:set-restore-workspace', (_event, enabled) => {
+    setRestoreWorkspaceEnabled(enabled);
+    return { enabled: restoreWorkspaceEnabled };
   });
 
   ipcMain.handle('chatclient:set-shell-overlay', (_event, visible) => {
@@ -638,9 +806,10 @@ function registerIpc() {
 }
 
 function createWindow() {
+  const restoredWindowOptions = getRestoredWindowOptions();
+
   mainWindow = new BrowserWindow({
-    width: 1280,
-    height: 820,
+    ...restoredWindowOptions,
     minWidth: 980,
     minHeight: 640,
     autoHideMenuBar: true,
@@ -653,6 +822,10 @@ function createWindow() {
       sandbox: true
     }
   });
+
+  const [contentWidth, contentHeight] = mainWindow.getContentSize();
+  layout.width = contentWidth;
+  layout.height = contentHeight;
 
   for (const provider of Object.values(PROVIDERS)) {
     const view = configureProviderView(provider);
@@ -674,16 +847,27 @@ function createWindow() {
   mainWindow.on('resize', () => {
     applyViewLayout();
     applyChromeOverlayLayout();
+    scheduleSessionSave(500);
   });
+  mainWindow.on('move', () => scheduleSessionSave(500));
   mainWindow.on('maximize', () => {
     applyViewLayout();
     applyChromeOverlayLayout();
+    scheduleSessionSave();
   });
   mainWindow.on('unmaximize', () => {
     applyViewLayout();
     applyChromeOverlayLayout();
+    scheduleSessionSave();
   });
   mainWindow.on('blur', () => setChromeVisibility(false, false));
+
+  mainWindow.on('close', () => {
+    restoredWindowState = getPersistedWindowState();
+    clearTimeout(sessionSaveTimer);
+    sessionSaveTimer = null;
+    saveSessionStateNow();
+  });
 
   mainWindow.on('closed', () => {
     for (const view of providerViews.values()) {
@@ -714,11 +898,16 @@ function createWindow() {
   applyViewLayout();
   applyChromeOverlayLayout();
   startChromeHoverTracking();
+
+  if (restoredWindowState?.maximized) {
+    mainWindow.maximize();
+  }
 }
 
 registerIpc();
 
 app.whenReady().then(() => {
+  loadSessionState();
   createWindow();
 
   app.on('activate', () => {

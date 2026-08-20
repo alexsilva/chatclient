@@ -10,6 +10,7 @@
   const refreshButton = document.getElementById('refreshButton');
   const quimeraButton = document.getElementById('quimeraButton');
   const quimeraSwitch = document.getElementById('quimeraSwitch');
+  const restoreWorkspaceSwitch = document.getElementById('restoreWorkspaceSwitch');
   const settingsButton = document.getElementById('settingsButton');
   const settingsPanel = document.getElementById('settingsPanel');
   const closeSettingsButton = document.getElementById('closeSettingsButton');
@@ -19,6 +20,7 @@
     mode: 'chatgpt',
     splitRatio: 0.5,
     quimeraAutoApproveEnabled: true,
+    restoreWorkspaceEnabled: true,
     railVisible: false,
     toolbarVisible: false
   };
@@ -66,6 +68,9 @@
 
     quimeraSwitch.classList.toggle('active', state.quimeraAutoApproveEnabled);
     quimeraSwitch.setAttribute('aria-checked', String(state.quimeraAutoApproveEnabled));
+
+    restoreWorkspaceSwitch.classList.toggle('active', state.restoreWorkspaceEnabled);
+    restoreWorkspaceSwitch.setAttribute('aria-checked', String(state.restoreWorkspaceEnabled));
 
     updateLayout();
   }
@@ -163,6 +168,23 @@
     }
   }
 
+  async function setRestoreWorkspaceEnabled(enabled) {
+    state.restoreWorkspaceEnabled = Boolean(enabled);
+    renderState();
+
+    if (!isElectron) {
+      return;
+    }
+
+    try {
+      const result = await bridge.setRestoreWorkspace(state.restoreWorkspaceEnabled);
+      state.restoreWorkspaceEnabled = result.enabled;
+      renderState();
+    } catch {
+      showToast('Não foi possível atualizar a restauração de trabalho.');
+    }
+  }
+
   function openSettings() {
     settingsPanel.classList.add('visible');
     settingsPanel.setAttribute('aria-hidden', 'false');
@@ -209,6 +231,10 @@
 
   quimeraSwitch.addEventListener('click', () => {
     setQuimeraEnabled(!state.quimeraAutoApproveEnabled);
+  });
+
+  restoreWorkspaceSwitch.addEventListener('click', () => {
+    setRestoreWorkspaceEnabled(!state.restoreWorkspaceEnabled);
   });
 
   settingsButton.addEventListener('click', openSettings);

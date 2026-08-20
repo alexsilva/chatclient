@@ -57,6 +57,16 @@ button {
   padding: 6px 0 8px;
   background: var(--rail-bg);
   border-right: 1px solid var(--border);
+  opacity: 0;
+  transform: translateX(-100%);
+  pointer-events: none;
+  transition: transform 150ms ease, opacity 120ms ease;
+}
+
+html[data-rail-visible="true"] .rail {
+  opacity: 1;
+  transform: translateX(0);
+  pointer-events: auto;
 }
 
 .brand {
@@ -137,7 +147,7 @@ button {
 .toolbar {
   position: absolute;
   z-index: 45;
-  left: var(--rail-width);
+  left: 0;
   right: 0;
   top: 0;
   height: var(--toolbar-height);
@@ -149,6 +159,20 @@ button {
   border-bottom: 1px solid var(--border);
   backdrop-filter: blur(14px);
   -webkit-app-region: drag;
+  opacity: 0;
+  transform: translateY(-100%);
+  pointer-events: none;
+  transition: transform 150ms ease, opacity 120ms ease, left 150ms ease;
+}
+
+html[data-toolbar-visible="true"] .toolbar {
+  opacity: 1;
+  transform: translateY(0);
+  pointer-events: auto;
+}
+
+html[data-rail-visible="true"] .toolbar {
+  left: var(--rail-width);
 }
 
 .toolbar button {
@@ -199,8 +223,19 @@ button {
 }
 
 .tool-button.active {
-  color: #dffcf1;
-  box-shadow: inset 0 0 0 1px rgba(54, 199, 143, 0.32);
+  background: rgba(54, 199, 143, 0.18);
+  color: #e8fff6;
+  box-shadow:
+    inset 0 0 0 1px rgba(54, 199, 143, 0.45),
+    0 0 0 1px rgba(54, 199, 143, 0.08);
+}
+
+.tool-button.active:hover {
+  background: rgba(54, 199, 143, 0.26);
+  color: #f4fffa;
+  box-shadow:
+    inset 0 0 0 1px rgba(54, 199, 143, 0.55),
+    0 0 0 1px rgba(54, 199, 143, 0.12);
 }
 
 .tool-button.icon-only {
@@ -214,11 +249,17 @@ button {
   font-weight: 650;
 }
 
+.quimera-icon {
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+}
+
 .content-frame {
   position: absolute;
   z-index: 1;
-  left: var(--rail-width);
-  top: var(--toolbar-height);
+  left: 0;
+  top: 0;
   right: 0;
   bottom: 0;
   overflow: hidden;

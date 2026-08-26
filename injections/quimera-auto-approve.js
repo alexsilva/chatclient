@@ -5,20 +5,29 @@
   const PROMPT_PHRASES = ['permitir que', 'allow '];
   const MAX_CONTAINER_TEXT_LENGTH = 6000;
   const MAX_ANCESTOR_DEPTH = 14;
-  const CLICK_DELAY_MIN_MS = 400;
-  const CLICK_DELAY_MAX_MS = 900;
+  const DEFAULT_CLICK_DELAY_MS = 3000;
+  const MAX_CLICK_DELAY_MS = 30000;
   const SCAN_DEBOUNCE_MS = 500;
   const BUTTON_SELECTOR = 'button, [role="button"]';
   const LOG_PREFIX = '[chatclient:quimera]';
 
-  if (window[API_KEY]?.version === 1) {
+  if (window[API_KEY]?.version === 2) {
     return;
   }
 
   const state = {
     enabled: true,
+    delayMs: DEFAULT_CLICK_DELAY_MS,
     processedButtons: new WeakSet()
   };
+
+  function normalizeDelayMs(value) {
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric)) {
+      return DEFAULT_CLICK_DELAY_MS;
+    }
+    return Math.min(MAX_CLICK_DELAY_MS, Math.max(0, Math.round(numeric)));
+  }
 
   function normalizedText(element) {
     return (element.textContent || '').trim().toLowerCase();
@@ -68,7 +77,7 @@
       }
 
       state.processedButtons.add(candidate);
-      const delayMs = CLICK_DELAY_MIN_MS + Math.random() * (CLICK_DELAY_MAX_MS - CLICK_DELAY_MIN_MS);
+      const delayMs = state.delayMs;
 
       setTimeout(() => {
         if (!state.enabled || !candidate.isConnected || isDisabled(candidate)) {
@@ -123,7 +132,7 @@
   observer.observe(document.documentElement, { childList: true, subtree: true });
 
   window[API_KEY] = {
-    version: 1,
+    version: 2,
     setEnabled(enabled) {
       state.enabled = Boolean(enabled);
       if (state.enabled) {
@@ -132,6 +141,12 @@
     },
     getEnabled() {
       return state.enabled;
+    },
+    setDelayMs(delayMs) {
+      state.delayMs = normalizeDelayMs(delayMs);
+    },
+    getDelayMs() {
+      return state.delayMs;
     }
   };
 

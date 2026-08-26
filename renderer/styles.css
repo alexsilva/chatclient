@@ -471,6 +471,32 @@ html[data-browser-preview="true"][data-mode="compare"] .browser-preview {
   line-height: 1.45;
 }
 
+.setting-number-control {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.setting-number {
+  width: 70px;
+  height: 32px;
+  padding: 0 8px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  outline: none;
+  background: var(--panel-elevated);
+  color: var(--text);
+  font: inherit;
+  text-align: right;
+}
+
+.setting-number:focus {
+  border-color: var(--accent);
+}
+
 .switch {
   flex: 0 0 auto;
   width: 42px;

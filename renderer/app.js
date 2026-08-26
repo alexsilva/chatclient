@@ -10,6 +10,7 @@
   const refreshButton = document.getElementById('refreshButton');
   const quimeraButton = document.getElementById('quimeraButton');
   const quimeraSwitch = document.getElementById('quimeraSwitch');
+  const quimeraDelayInput = document.getElementById('quimeraDelayInput');
   const restoreWorkspaceSwitch = document.getElementById('restoreWorkspaceSwitch');
   const settingsButton = document.getElementById('settingsButton');
   const settingsPanel = document.getElementById('settingsPanel');
@@ -20,6 +21,7 @@
     mode: 'chatgpt',
     splitRatio: 0.5,
     quimeraAutoApproveEnabled: true,
+    quimeraApprovalDelayMs: 3000,
     restoreWorkspaceEnabled: true,
     railVisible: false,
     toolbarVisible: false
@@ -68,6 +70,10 @@
 
     quimeraSwitch.classList.toggle('active', state.quimeraAutoApproveEnabled);
     quimeraSwitch.setAttribute('aria-checked', String(state.quimeraAutoApproveEnabled));
+
+    if (document.activeElement !== quimeraDelayInput) {
+      quimeraDelayInput.value = String(state.quimeraApprovalDelayMs / 1000);
+    }
 
     restoreWorkspaceSwitch.classList.toggle('active', state.restoreWorkspaceEnabled);
     restoreWorkspaceSwitch.setAttribute('aria-checked', String(state.restoreWorkspaceEnabled));
@@ -181,6 +187,27 @@
     }
   }
 
+  async function setQuimeraApprovalDelay(seconds) {
+    const numeric = Number(seconds);
+    const normalizedSeconds = Number.isFinite(numeric)
+      ? Math.min(30, Math.max(0, numeric))
+      : 3;
+    state.quimeraApprovalDelayMs = Math.round(normalizedSeconds * 1000);
+    renderState();
+
+    if (!isElectron) {
+      return;
+    }
+
+    try {
+      const result = await bridge.setQuimeraApprovalDelay(state.quimeraApprovalDelayMs);
+      state.quimeraApprovalDelayMs = result.delayMs;
+      renderState();
+    } catch {
+      showToast('Não foi possível atualizar o atraso de aprovação.');
+    }
+  }
+
   async function setRestoreWorkspaceEnabled(enabled) {
     state.restoreWorkspaceEnabled = Boolean(enabled);
     renderState();
@@ -244,6 +271,10 @@
 
   quimeraSwitch.addEventListener('click', () => {
     setQuimeraEnabled(!state.quimeraAutoApproveEnabled);
+  });
+
+  quimeraDelayInput.addEventListener('change', () => {
+    setQuimeraApprovalDelay(quimeraDelayInput.value);
   });
 
   restoreWorkspaceSwitch.addEventListener('click', () => {

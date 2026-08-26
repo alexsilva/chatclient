@@ -48,6 +48,8 @@ const CHROME_REVEAL = {
   pollIntervalMs: 75,
   idlePollIntervalMs: 250
 };
+const DEFAULT_QUIMERA_APPROVAL_DELAY_MS = 3000;
+const MAX_QUIMERA_APPROVAL_DELAY_MS = 30000;
 
 const QUIMERA_AUTO_APPROVE_SCRIPT = readFileSync(
   join(__dirname, 'injections', 'quimera-auto-approve.js'),
@@ -60,6 +62,7 @@ let chromeViews = new Map();
 let mode = 'chatgpt';
 let layout = { ...DEFAULT_LAYOUT };
 let quimeraAutoApproveEnabled = true;
+let quimeraApprovalDelayMs = DEFAULT_QUIMERA_APPROVAL_DELAY_MS;
 let shellOverlayVisible = false;
 let railVisible = false;
 let toolbarVisible = false;
@@ -89,6 +92,18 @@ function loadSessionState() {
       quimeraAutoApproveEnabled = saved.quimeraAutoApproveEnabled;
     }
 
+    if (Number.isFinite(saved.quimeraApprovalDelayMs)) {
+      quimeraApprovalDelayMs = normalizeQuimeraApprovalDelayMs(saved.quimeraApprovalDelayMs);
+    }
+
+    // Geometria da janela é estado da aplicação, não do workspace.
+    // Mesmo com a restauração do workspace desativada, o cliente deve abrir
+    // exatamente onde o usuário o deixou em vez de voltar ao posicionamento
+    // padrão do sistema (normalmente centralizado).
+    if (saved.window && typeof saved.window === 'object') {
+      restoredWindowState = saved.window;
+    }
+
     if (!restoreWorkspaceEnabled) {
       return;
     }
@@ -110,9 +125,6 @@ function loadSessionState() {
       }
     }
 
-    if (saved.window && typeof saved.window === 'object') {
-      restoredWindowState = saved.window;
-    }
   } catch (error) {
     if (error?.code !== 'ENOENT') {
       console.warn('[chatclient] Não foi possível restaurar a sessão:', error.message);
@@ -139,6 +151,7 @@ function buildSessionState() {
     mode,
     splitRatio: layout.splitRatio,
     quimeraAutoApproveEnabled,
+    quimeraApprovalDelayMs,
     providers: { ...providerUrls },
     window: getPersistedWindowState()
   };
@@ -165,6 +178,14 @@ function scheduleSessionSave(delayMs = 250) {
     sessionSaveTimer = null;
     saveSessionStateNow();
   }, delayMs);
+}
+
+function normalizeQuimeraApprovalDelayMs(value) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) {
+    return DEFAULT_QUIMERA_APPROVAL_DELAY_MS;
+  }
+  return Math.min(MAX_QUIMERA_APPROVAL_DELAY_MS, Math.max(0, Math.round(numeric)));
 }
 
 function getRestoredWindowOptions() {
@@ -219,6 +240,7 @@ function emitState() {
   mainWindow.webContents.send('chatclient:state', {
     mode,
     quimeraAutoApproveEnabled,
+    quimeraApprovalDelayMs,
     restoreWorkspaceEnabled
   });
 
@@ -227,6 +249,7 @@ function emitState() {
       view.webContents.send('chatclient:state', {
         mode,
         quimeraAutoApproveEnabled,
+        quimeraApprovalDelayMs,
         restoreWorkspaceEnabled
       });
     }
@@ -458,9 +481,9 @@ function setProviderLoading(providerId, patch) {
   updateLoadingOverlay();
 }
 
-// Mostra o overlay de carregamento sobre a área do provider que está
-// carregando (a metade correspondente no modo compare, a janela toda nos
-// modos simples), para o usuário não ver só uma tela preta.
+// Mostra o overlay somente durante carregamento real da janela/documento
+// principal do provider. Carregamentos internos do ChatGPT/Grok não devem
+// bloquear nem cobrir o conteúdo já aberto.
 function updateLoadingOverlay() {
   const overlay = chromeViews.get('loading');
   if (!overlay || !mainWindow || mainWindow.isDestroyed()) {
@@ -684,8 +707,15 @@ function configureProviderView(provider) {
     shell.openExternal(url).catch(() => {});
   });
 
-  contents.on('did-start-loading', () => {
+  contents.on('did-start-navigation', (_event, details) => {
+    if (!details?.isMainFrame || details.isInPlace) {
+      return;
+    }
+
     setProviderLoading(provider.id, { loading: true, error: null });
+  });
+
+  contents.on('did-start-loading', () => {
     emitProviderStatus(provider.id, { loading: true });
   });
 
@@ -788,6 +818,7 @@ function configureChromeView(name, fileName) {
     view.webContents.send('chatclient:state', {
       mode,
       quimeraAutoApproveEnabled,
+      quimeraApprovalDelayMs,
       restoreWorkspaceEnabled
     });
     view.webContents.send('chatclient:chrome-state', {
@@ -808,27 +839,41 @@ function injectQuimeraAutoApprove() {
   }
 
   view.webContents.executeJavaScript(QUIMERA_AUTO_APPROVE_SCRIPT)
-    .then(() => setQuimeraAutoApprove(quimeraAutoApproveEnabled, false))
+    .then(() => syncQuimeraAutoApproveConfig())
     .catch(() => {
       // Navigation can briefly make the renderer unavailable; dom-ready retries it.
     });
 }
 
+function syncQuimeraAutoApproveConfig() {
+  const view = providerViews.get('chatgpt');
+  if (!view || view.webContents.isDestroyed()) {
+    return;
+  }
+
+  const enabled = JSON.stringify(quimeraAutoApproveEnabled);
+  const delayMs = JSON.stringify(quimeraApprovalDelayMs);
+  view.webContents.executeJavaScript(
+    `window.__chatClientQuimeraAutoApprove?.setEnabled(${enabled});` +
+    `window.__chatClientQuimeraAutoApprove?.setDelayMs(${delayMs});`
+  ).catch(() => {});
+}
+
 function setQuimeraAutoApprove(enabled, notify = true) {
   quimeraAutoApproveEnabled = Boolean(enabled);
   scheduleSessionSave();
-
-  const view = providerViews.get('chatgpt');
-  if (view && !view.webContents.isDestroyed()) {
-    const serialized = JSON.stringify(quimeraAutoApproveEnabled);
-    view.webContents.executeJavaScript(
-      `window.__chatClientQuimeraAutoApprove?.setEnabled(${serialized});`
-    ).catch(() => {});
-  }
+  syncQuimeraAutoApproveConfig();
 
   if (notify) {
     emitState();
   }
+}
+
+function setQuimeraApprovalDelayMs(delayMs) {
+  quimeraApprovalDelayMs = normalizeQuimeraApprovalDelayMs(delayMs);
+  scheduleSessionSave();
+  syncQuimeraAutoApproveConfig();
+  emitState();
 }
 
 function setRestoreWorkspaceEnabled(enabled) {
@@ -893,6 +938,20 @@ function applyViewLayout() {
   setViewBounds(active, { x, y, width, height });
 }
 
+function syncLayoutToWindowContent() {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    return;
+  }
+
+  const [contentWidth, contentHeight] = mainWindow.getContentSize();
+  const headerHeight = mode === 'compare' ? 34 : 0;
+
+  layout.x = 0;
+  layout.y = headerHeight;
+  layout.width = contentWidth;
+  layout.height = Math.max(0, contentHeight - headerHeight);
+}
+
 function setMode(nextMode, notify = true) {
   if (!MODES.has(nextMode)) {
     return false;
@@ -901,6 +960,7 @@ function setMode(nextMode, notify = true) {
   mode = nextMode;
   scheduleSessionSave();
   ensureModeViews(mode);
+  syncLayoutToWindowContent();
   applyViewLayout();
 
   if (notify) {
@@ -953,6 +1013,7 @@ function registerIpc() {
   ipcMain.handle('chatclient:get-state', () => ({
     mode,
     quimeraAutoApproveEnabled,
+    quimeraApprovalDelayMs,
     restoreWorkspaceEnabled,
     railVisible,
     toolbarVisible,
@@ -965,7 +1026,10 @@ function registerIpc() {
   });
 
   ipcMain.handle('chatclient:update-layout', (_event, nextLayout) => {
-    layout = safeRectangle(nextLayout);
+    const requested = safeRectangle(nextLayout);
+    layout.dividerWidth = requested.dividerWidth;
+    layout.splitRatio = requested.splitRatio;
+    syncLayoutToWindowContent();
     scheduleSessionSave();
     applyViewLayout();
     return layout;
@@ -978,6 +1042,11 @@ function registerIpc() {
   ipcMain.handle('chatclient:set-quimera-auto-approve', (_event, enabled) => {
     setQuimeraAutoApprove(enabled);
     return { enabled: quimeraAutoApproveEnabled };
+  });
+
+  ipcMain.handle('chatclient:set-quimera-approval-delay', (_event, delayMs) => {
+    setQuimeraApprovalDelayMs(delayMs);
+    return { delayMs: quimeraApprovalDelayMs };
   });
 
   ipcMain.handle('chatclient:set-restore-workspace', (_event, enabled) => {
@@ -1028,9 +1097,7 @@ function createWindow() {
     }
   });
 
-  const [contentWidth, contentHeight] = mainWindow.getContentSize();
-  layout.width = contentWidth;
-  layout.height = contentHeight;
+  syncLayoutToWindowContent();
 
   // Só carrega os providers do modo atual; os demais são criados sob demanda.
   ensureModeViews(mode);
@@ -1054,6 +1121,7 @@ function createWindow() {
   });
 
   mainWindow.on('resize', () => {
+    syncLayoutToWindowContent();
     applyViewLayout();
     applyChromeOverlayLayout();
     scheduleSessionSave(500);

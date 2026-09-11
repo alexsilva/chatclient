@@ -11,6 +11,7 @@
   const quimeraButton = document.getElementById('quimeraButton');
   const quimeraSwitch = document.getElementById('quimeraSwitch');
   const quimeraDelayInput = document.getElementById('quimeraDelayInput');
+  const chatgptReasoningSelect = document.getElementById('chatgptReasoningSelect');
   const restoreWorkspaceSwitch = document.getElementById('restoreWorkspaceSwitch');
   const settingsButton = document.getElementById('settingsButton');
   const settingsPanel = document.getElementById('settingsPanel');
@@ -22,6 +23,7 @@
     splitRatio: 0.5,
     quimeraAutoApproveEnabled: true,
     quimeraApprovalDelayMs: 3000,
+    chatgptReasoningLevel: 'high',
     restoreWorkspaceEnabled: true,
     railVisible: false,
     toolbarVisible: false
@@ -73,6 +75,10 @@
 
     if (document.activeElement !== quimeraDelayInput) {
       quimeraDelayInput.value = String(state.quimeraApprovalDelayMs / 1000);
+    }
+
+    if (document.activeElement !== chatgptReasoningSelect) {
+      chatgptReasoningSelect.value = state.chatgptReasoningLevel;
     }
 
     restoreWorkspaceSwitch.classList.toggle('active', state.restoreWorkspaceEnabled);
@@ -225,6 +231,30 @@
     }
   }
 
+  async function setChatgptReasoningLevel(level) {
+    if (!['low', 'medium', 'high', 'extra-high'].includes(level)) {
+      return;
+    }
+
+    const previousLevel = state.chatgptReasoningLevel;
+    state.chatgptReasoningLevel = level;
+    renderState();
+
+    if (!isElectron) {
+      return;
+    }
+
+    try {
+      const result = await bridge.setChatgptReasoningLevel(level);
+      state.chatgptReasoningLevel = result.level;
+      renderState();
+    } catch {
+      state.chatgptReasoningLevel = previousLevel;
+      renderState();
+      showToast('Não foi possível atualizar o raciocínio do ChatGPT.');
+    }
+  }
+
   function openSettings() {
     settingsPanel.classList.add('visible');
     settingsPanel.setAttribute('aria-hidden', 'false');
@@ -275,6 +305,10 @@
 
   quimeraDelayInput.addEventListener('change', () => {
     setQuimeraApprovalDelay(quimeraDelayInput.value);
+  });
+
+  chatgptReasoningSelect.addEventListener('change', () => {
+    setChatgptReasoningLevel(chatgptReasoningSelect.value);
   });
 
   restoreWorkspaceSwitch.addEventListener('click', () => {

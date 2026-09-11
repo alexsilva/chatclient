@@ -50,9 +50,15 @@ const CHROME_REVEAL = {
 };
 const DEFAULT_QUIMERA_APPROVAL_DELAY_MS = 3000;
 const MAX_QUIMERA_APPROVAL_DELAY_MS = 30000;
+const CHATGPT_REASONING_LEVELS = new Set(['low', 'medium', 'high', 'extra-high']);
+const DEFAULT_CHATGPT_REASONING_LEVEL = 'high';
 
 const QUIMERA_AUTO_APPROVE_SCRIPT = readFileSync(
   join(__dirname, 'injections', 'quimera-auto-approve.js'),
+  'utf8'
+);
+const CHATGPT_REASONING_SCRIPT = readFileSync(
+  join(__dirname, 'injections', 'chatgpt-reasoning.js'),
   'utf8'
 );
 
@@ -74,6 +80,7 @@ let sessionStatePath = null;
 let sessionSaveTimer = null;
 let restoredWindowState = null;
 let restoreWorkspaceEnabled = true;
+let chatgptReasoningLevel = DEFAULT_CHATGPT_REASONING_LEVEL;
 let providerUrls = Object.fromEntries(
   Object.values(PROVIDERS).map((provider) => [provider.id, provider.url])
 );
@@ -94,6 +101,10 @@ function loadSessionState() {
 
     if (Number.isFinite(saved.quimeraApprovalDelayMs)) {
       quimeraApprovalDelayMs = normalizeQuimeraApprovalDelayMs(saved.quimeraApprovalDelayMs);
+    }
+
+    if (CHATGPT_REASONING_LEVELS.has(saved.chatgptReasoningLevel)) {
+      chatgptReasoningLevel = saved.chatgptReasoningLevel;
     }
 
     // Geometria da janela é estado da aplicação, não do workspace.
@@ -152,6 +163,7 @@ function buildSessionState() {
     splitRatio: layout.splitRatio,
     quimeraAutoApproveEnabled,
     quimeraApprovalDelayMs,
+    chatgptReasoningLevel,
     providers: { ...providerUrls },
     window: getPersistedWindowState()
   };
@@ -241,6 +253,7 @@ function emitState() {
     mode,
     quimeraAutoApproveEnabled,
     quimeraApprovalDelayMs,
+    chatgptReasoningLevel,
     restoreWorkspaceEnabled
   });
 
@@ -250,6 +263,7 @@ function emitState() {
         mode,
         quimeraAutoApproveEnabled,
         quimeraApprovalDelayMs,
+        chatgptReasoningLevel,
         restoreWorkspaceEnabled
       });
     }
@@ -762,6 +776,7 @@ function configureProviderView(provider) {
   if (provider.id === 'chatgpt') {
     contents.on('dom-ready', () => {
       injectQuimeraAutoApprove();
+      injectChatgptReasoningControl();
     });
   }
 
@@ -819,6 +834,7 @@ function configureChromeView(name, fileName) {
       mode,
       quimeraAutoApproveEnabled,
       quimeraApprovalDelayMs,
+      chatgptReasoningLevel,
       restoreWorkspaceEnabled
     });
     view.webContents.send('chatclient:chrome-state', {
@@ -874,6 +890,47 @@ function setQuimeraApprovalDelayMs(delayMs) {
   scheduleSessionSave();
   syncQuimeraAutoApproveConfig();
   emitState();
+}
+
+function injectChatgptReasoningControl() {
+  const view = providerViews.get('chatgpt');
+  if (!view || view.webContents.isDestroyed()) {
+    return;
+  }
+
+  view.webContents.executeJavaScript(CHATGPT_REASONING_SCRIPT)
+    .then(() => syncChatgptReasoningConfig())
+    .catch(() => {
+      // Navigation can briefly make the renderer unavailable; dom-ready retries it.
+    });
+}
+
+function syncChatgptReasoningConfig() {
+  const view = providerViews.get('chatgpt');
+  if (!view || view.webContents.isDestroyed()) {
+    return;
+  }
+
+  const level = JSON.stringify(chatgptReasoningLevel);
+  view.webContents.executeJavaScript(
+    `window.__chatClientReasoningControl?.setLevel(${level})`
+  ).then((applied) => {
+    if (applied === false) {
+      console.warn(`[chatgpt-reasoning] não foi possível aplicar o nível ${chatgptReasoningLevel} no seletor nativo`);
+    }
+  }).catch(() => {});
+}
+
+function setChatgptReasoningLevel(level) {
+  if (!CHATGPT_REASONING_LEVELS.has(level)) {
+    return false;
+  }
+
+  chatgptReasoningLevel = level;
+  scheduleSessionSave();
+  syncChatgptReasoningConfig();
+  emitState();
+  return true;
 }
 
 function setRestoreWorkspaceEnabled(enabled) {
@@ -1014,6 +1071,7 @@ function registerIpc() {
     mode,
     quimeraAutoApproveEnabled,
     quimeraApprovalDelayMs,
+    chatgptReasoningLevel,
     restoreWorkspaceEnabled,
     railVisible,
     toolbarVisible,
@@ -1047,6 +1105,13 @@ function registerIpc() {
   ipcMain.handle('chatclient:set-quimera-approval-delay', (_event, delayMs) => {
     setQuimeraApprovalDelayMs(delayMs);
     return { delayMs: quimeraApprovalDelayMs };
+  });
+
+  ipcMain.handle('chatclient:set-chatgpt-reasoning-level', (_event, level) => {
+    if (!setChatgptReasoningLevel(level)) {
+      throw new Error(`Unsupported ChatGPT reasoning level: ${String(level)}`);
+    }
+    return { level: chatgptReasoningLevel };
   });
 
   ipcMain.handle('chatclient:set-restore-workspace', (_event, enabled) => {

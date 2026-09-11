@@ -497,6 +497,22 @@ html[data-browser-preview="true"][data-mode="compare"] .browser-preview {
   border-color: var(--accent);
 }
 
+.setting-select {
+  flex: 0 0 124px;
+  height: 32px;
+  padding: 0 30px 0 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  outline: none;
+  background: var(--panel-elevated);
+  color: var(--text);
+  font: inherit;
+}
+
+.setting-select:focus {
+  border-color: var(--accent);
+}
+
 .switch {
   flex: 0 0 auto;
   width: 42px;

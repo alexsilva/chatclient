@@ -50,6 +50,8 @@ const CHROME_REVEAL = {
 };
 const DEFAULT_QUIMERA_APPROVAL_DELAY_MS = 3000;
 const MAX_QUIMERA_APPROVAL_DELAY_MS = 30000;
+const QUIMERA_APPROVAL_SCOPES = new Set(['once', 'conversation']);
+const DEFAULT_QUIMERA_APPROVAL_SCOPE = 'once';
 const CHATGPT_REASONING_LEVELS = new Set(['low', 'medium', 'high', 'extra-high']);
 const DEFAULT_CHATGPT_REASONING_LEVEL = 'high';
 
@@ -69,6 +71,7 @@ let mode = 'chatgpt';
 let layout = { ...DEFAULT_LAYOUT };
 let quimeraAutoApproveEnabled = true;
 let quimeraApprovalDelayMs = DEFAULT_QUIMERA_APPROVAL_DELAY_MS;
+let quimeraApprovalScope = DEFAULT_QUIMERA_APPROVAL_SCOPE;
 let shellOverlayVisible = false;
 let railVisible = false;
 let toolbarVisible = false;
@@ -101,6 +104,10 @@ function loadSessionState() {
 
     if (Number.isFinite(saved.quimeraApprovalDelayMs)) {
       quimeraApprovalDelayMs = normalizeQuimeraApprovalDelayMs(saved.quimeraApprovalDelayMs);
+    }
+
+    if (QUIMERA_APPROVAL_SCOPES.has(saved.quimeraApprovalScope)) {
+      quimeraApprovalScope = saved.quimeraApprovalScope;
     }
 
     if (CHATGPT_REASONING_LEVELS.has(saved.chatgptReasoningLevel)) {
@@ -163,6 +170,7 @@ function buildSessionState() {
     splitRatio: layout.splitRatio,
     quimeraAutoApproveEnabled,
     quimeraApprovalDelayMs,
+    quimeraApprovalScope,
     chatgptReasoningLevel,
     providers: { ...providerUrls },
     window: getPersistedWindowState()
@@ -244,28 +252,27 @@ function safeRectangle(value) {
   };
 }
 
+function buildRendererState() {
+  return {
+    mode,
+    quimeraAutoApproveEnabled,
+    quimeraApprovalDelayMs,
+    quimeraApprovalScope,
+    chatgptReasoningLevel,
+    restoreWorkspaceEnabled
+  };
+}
+
 function emitState() {
   if (!mainWindow || mainWindow.isDestroyed()) {
     return;
   }
 
-  mainWindow.webContents.send('chatclient:state', {
-    mode,
-    quimeraAutoApproveEnabled,
-    quimeraApprovalDelayMs,
-    chatgptReasoningLevel,
-    restoreWorkspaceEnabled
-  });
+  mainWindow.webContents.send('chatclient:state', buildRendererState());
 
   for (const view of chromeViews.values()) {
     if (!view.webContents.isDestroyed()) {
-      view.webContents.send('chatclient:state', {
-        mode,
-        quimeraAutoApproveEnabled,
-        quimeraApprovalDelayMs,
-        chatgptReasoningLevel,
-        restoreWorkspaceEnabled
-      });
+      view.webContents.send('chatclient:state', buildRendererState());
     }
   }
 }
@@ -830,13 +837,7 @@ function configureChromeView(name, fileName) {
   });
 
   view.webContents.once('did-finish-load', () => {
-    view.webContents.send('chatclient:state', {
-      mode,
-      quimeraAutoApproveEnabled,
-      quimeraApprovalDelayMs,
-      chatgptReasoningLevel,
-      restoreWorkspaceEnabled
-    });
+    view.webContents.send('chatclient:state', buildRendererState());
     view.webContents.send('chatclient:chrome-state', {
       railVisible,
       toolbarVisible
@@ -869,9 +870,11 @@ function syncQuimeraAutoApproveConfig() {
 
   const enabled = JSON.stringify(quimeraAutoApproveEnabled);
   const delayMs = JSON.stringify(quimeraApprovalDelayMs);
+  const scope = JSON.stringify(quimeraApprovalScope);
   view.webContents.executeJavaScript(
-    `window.__chatClientQuimeraAutoApprove?.setEnabled(${enabled});` +
-    `window.__chatClientQuimeraAutoApprove?.setDelayMs(${delayMs});`
+    `window.__chatClientQuimeraAutoApprove?.setScope(${scope});` +
+    `window.__chatClientQuimeraAutoApprove?.setDelayMs(${delayMs});` +
+    `window.__chatClientQuimeraAutoApprove?.setEnabled(${enabled});`
   ).catch(() => {});
 }
 
@@ -890,6 +893,18 @@ function setQuimeraApprovalDelayMs(delayMs) {
   scheduleSessionSave();
   syncQuimeraAutoApproveConfig();
   emitState();
+}
+
+function setQuimeraApprovalScope(scope) {
+  if (!QUIMERA_APPROVAL_SCOPES.has(scope)) {
+    return false;
+  }
+
+  quimeraApprovalScope = scope;
+  scheduleSessionSave();
+  syncQuimeraAutoApproveConfig();
+  emitState();
+  return true;
 }
 
 function injectChatgptReasoningControl() {
@@ -1068,11 +1083,7 @@ function handleShortcut(input) {
 
 function registerIpc() {
   ipcMain.handle('chatclient:get-state', () => ({
-    mode,
-    quimeraAutoApproveEnabled,
-    quimeraApprovalDelayMs,
-    chatgptReasoningLevel,
-    restoreWorkspaceEnabled,
+    ...buildRendererState(),
     railVisible,
     toolbarVisible,
     providers: Object.values(PROVIDERS)
@@ -1105,6 +1116,13 @@ function registerIpc() {
   ipcMain.handle('chatclient:set-quimera-approval-delay', (_event, delayMs) => {
     setQuimeraApprovalDelayMs(delayMs);
     return { delayMs: quimeraApprovalDelayMs };
+  });
+
+  ipcMain.handle('chatclient:set-quimera-approval-scope', (_event, scope) => {
+    if (!setQuimeraApprovalScope(scope)) {
+      throw new Error(`Unsupported Quimera approval scope: ${String(scope)}`);
+    }
+    return { scope: quimeraApprovalScope };
   });
 
   ipcMain.handle('chatclient:set-chatgpt-reasoning-level', (_event, level) => {

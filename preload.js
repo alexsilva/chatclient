@@ -13,6 +13,8 @@ contextBridge.exposeInMainWorld('chatClient', {
     ipcRenderer.invoke('chatclient:set-quimera-auto-approve', enabled),
   setQuimeraApprovalDelay: (delayMs) =>
     ipcRenderer.invoke('chatclient:set-quimera-approval-delay', delayMs),
+  setQuimeraApprovalScope: (scope) =>
+    ipcRenderer.invoke('chatclient:set-quimera-approval-scope', scope),
   setChatgptReasoningLevel: (level) =>
     ipcRenderer.invoke('chatclient:set-chatgpt-reasoning-level', level),
   setRestoreWorkspace: (enabled) =>

@@ -11,6 +11,7 @@
   const quimeraButton = document.getElementById('quimeraButton');
   const quimeraSwitch = document.getElementById('quimeraSwitch');
   const quimeraDelayInput = document.getElementById('quimeraDelayInput');
+  const quimeraScopeSelect = document.getElementById('quimeraScopeSelect');
   const chatgptReasoningSelect = document.getElementById('chatgptReasoningSelect');
   const restoreWorkspaceSwitch = document.getElementById('restoreWorkspaceSwitch');
   const settingsButton = document.getElementById('settingsButton');
@@ -23,6 +24,7 @@
     splitRatio: 0.5,
     quimeraAutoApproveEnabled: true,
     quimeraApprovalDelayMs: 3000,
+    quimeraApprovalScope: 'once',
     chatgptReasoningLevel: 'high',
     restoreWorkspaceEnabled: true,
     railVisible: false,
@@ -75,6 +77,10 @@
 
     if (document.activeElement !== quimeraDelayInput) {
       quimeraDelayInput.value = String(state.quimeraApprovalDelayMs / 1000);
+    }
+
+    if (document.activeElement !== quimeraScopeSelect) {
+      quimeraScopeSelect.value = state.quimeraApprovalScope;
     }
 
     if (document.activeElement !== chatgptReasoningSelect) {
@@ -214,6 +220,30 @@
     }
   }
 
+  async function setQuimeraApprovalScope(scope) {
+    if (!['once', 'conversation'].includes(scope)) {
+      return;
+    }
+
+    const previousScope = state.quimeraApprovalScope;
+    state.quimeraApprovalScope = scope;
+    renderState();
+
+    if (!isElectron) {
+      return;
+    }
+
+    try {
+      const result = await bridge.setQuimeraApprovalScope(scope);
+      state.quimeraApprovalScope = result.scope;
+      renderState();
+    } catch {
+      state.quimeraApprovalScope = previousScope;
+      renderState();
+      showToast('Não foi possível atualizar o escopo da aprovação.');
+    }
+  }
+
   async function setRestoreWorkspaceEnabled(enabled) {
     state.restoreWorkspaceEnabled = Boolean(enabled);
     renderState();
@@ -305,6 +335,10 @@
 
   quimeraDelayInput.addEventListener('change', () => {
     setQuimeraApprovalDelay(quimeraDelayInput.value);
+  });
+
+  quimeraScopeSelect.addEventListener('change', () => {
+    setQuimeraApprovalScope(quimeraScopeSelect.value);
   });
 
   chatgptReasoningSelect.addEventListener('change', () => {

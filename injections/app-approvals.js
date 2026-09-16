@@ -42,6 +42,17 @@
     approvalQueue: Promise.resolve()
   };
 
+  // Log só no modo debug do ChatClient (execução a partir do código-fonte). O
+  // processo principal define a flag antes de injetar este script; instalado ela
+  // chega como false e nada é escrito no console da página.
+  function log(method, ...args) {
+    if (window.__chatClientDebug !== true) {
+      return;
+    }
+
+    console[method](LOG_PREFIX, ...args);
+  }
+
   function normalizeDelayMs(value) {
     const numeric = Number(value);
     if (!Number.isFinite(numeric)) {
@@ -244,18 +255,18 @@
     const items = await waitForScopeMenuItems(trigger);
 
     if (items.length === 0) {
-      console.warn(LOG_PREFIX, `${policy.name}: menu de escopo não abriu; aprovando apenas esta chamada`);
+      log('warn', `${policy.name}: menu de escopo não abriu; aprovando apenas esta chamada`);
       return false;
     }
 
     const option = pickConversationOption(items);
     if (!option) {
       closeScopeMenu();
-      console.warn(LOG_PREFIX, `${policy.name}: nenhuma opção de conversa reconhecida; aprovando apenas esta chamada`);
+      log('warn', `${policy.name}: nenhuma opção de conversa reconhecida; aprovando apenas esta chamada`);
       return false;
     }
 
-    console.info(LOG_PREFIX, `${policy.name}: aprovando para a conversa —`, elementText(option));
+    log('info', `${policy.name}: aprovando para a conversa —`, elementText(option));
     option.click();
     return true;
   }
@@ -282,7 +293,7 @@
       return;
     }
 
-    console.info(LOG_PREFIX, `${policy.name}: aprovando esta chamada`);
+    log('info', `${policy.name}: aprovando esta chamada`);
     candidate.click();
   }
 
@@ -292,7 +303,7 @@
     state.approvalQueue = state.approvalQueue
       .then(() => approve(candidate, policyId))
       .catch((error) => {
-        console.warn(LOG_PREFIX, 'falha ao aprovar prompt:', error);
+        log('warn', 'falha ao aprovar prompt:', error);
       });
   }
 

@@ -54,6 +54,15 @@ npm install
 npm start
 ```
 
+### Log e modo debug
+
+O ChatClient só escreve log quando roda a partir do código-fonte. Instalado — `.deb` ou AppImage —, `app.isPackaged` é verdadeiro, o modo debug fica desligado e o cliente fica em silêncio: nem o processo principal, nem as injeções, e o Chromium reduzido a falhas fatais.
+
+Com o modo debug ativo, o console das views é reemitido no processo principal e sai junto do `npm start`:
+
+- mensagens do próprio ChatClient, sempre. Elas levam o prefixo `[chatclient…]`, e o rótulo à frente diz de qual view vieram (`[chatgpt]`, `[shell]`, `[rail]`…).
+- erros das views do shell, porque exceção não capturada é o que mais interessa em depuração. Na página do provedor eles não passam: ali o log viraria o console do site.
+
 ### Prévia do shell no navegador
 
 A interface própria do ChatClient pode ser testada isoladamente sem abrir os provedores reais:

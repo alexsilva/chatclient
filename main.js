@@ -11,6 +11,60 @@ const {
 } = require('node:fs');
 const { join } = require('node:path');
 
+// Modo debug: ativo apenas quando o ChatClient roda a partir do código-fonte.
+// Instalado (deb/AppImage) `app.isPackaged` é true, o modo fica desligado e o
+// cliente não escreve nada — nem aqui, nem nas injeções.
+const debugMode = !app.isPackaged;
+const LOG_PREFIX = '[chatclient]';
+// Prefixo comum a tudo que o ChatClient escreve no console de uma view.
+const OWN_LOG_PREFIX = '[chatclient';
+const CONSOLE_METHOD_BY_LEVEL = {
+  debug: 'debug',
+  info: 'info',
+  warning: 'warn',
+  error: 'error'
+};
+
+if (!debugMode) {
+  // O Chromium escreve direto no stderr (dbus, GPU, WebRTC, rede) sem passar
+  // pelo console do processo; só o nível de log o cala. 3 = apenas fatais.
+  app.commandLine.appendSwitch('log-level', '3');
+}
+
+function emitLog(method, ...args) {
+  if (!debugMode) {
+    return;
+  }
+
+  (console[method] || console.log)(...args);
+}
+
+const log = {
+  info: (...args) => emitLog('info', LOG_PREFIX, ...args),
+  warn: (...args) => emitLog('warn', LOG_PREFIX, ...args),
+  error: (...args) => emitLog('error', LOG_PREFIX, ...args)
+};
+
+// O console de uma view morre no webContents dela, onde ninguém o lê: em debug
+// as mensagens são reemitidas aqui, junto com as do processo principal.
+// As do próprio ChatClient sempre passam. Nas views do shell os erros da página
+// também passam — exceção não capturada é o que mais interessa em debug —, mas
+// não nas do provedor: ali o log viraria o console do site de terceiros.
+function forwardViewConsole(contents, label, { includeViewErrors = false } = {}) {
+  if (!debugMode) {
+    return;
+  }
+
+  contents.on('console-message', ({ level, message }) => {
+    const fromChatClient = message.startsWith(OWN_LOG_PREFIX);
+    if (!fromChatClient && !(includeViewErrors && level === 'error')) {
+      return;
+    }
+
+    emitLog(CONSOLE_METHOD_BY_LEVEL[level] || 'log', `[${label}]`, message);
+  });
+}
+
 const PROVIDERS = {
   chatgpt: {
     id: 'chatgpt',
@@ -155,7 +209,7 @@ function loadSessionState() {
 
   } catch (error) {
     if (error?.code !== 'ENOENT') {
-      console.warn('[chatclient] Não foi possível restaurar a sessão:', error.message);
+      log.warn('Não foi possível restaurar a sessão:', error.message);
     }
   }
 }
@@ -199,7 +253,7 @@ function saveSessionStateNow() {
     writeFileSync(tempPath, `${JSON.stringify(buildSessionState(), null, 2)}\n`, 'utf8');
     renameSync(tempPath, sessionStatePath);
   } catch (error) {
-    console.warn('[chatclient] Não foi possível salvar a sessão:', error.message);
+    log.warn('Não foi possível salvar a sessão:', error.message);
   }
 }
 
@@ -828,6 +882,8 @@ function configureProviderView(provider) {
 
   const contents = view.webContents;
 
+  forwardViewConsole(contents, provider.id);
+
   contents.setWindowOpenHandler(({ url }) => {
     if (isManagedPopupNavigationUrl(url)) {
       return {
@@ -955,6 +1011,8 @@ function configureChromeView(name, fileName) {
   view.setBackgroundColor('#00000000');
   view.setVisible(false);
 
+  forwardViewConsole(view.webContents, name, { includeViewErrors: true });
+
   view.webContents.on('before-input-event', (event, input) => {
     if (handleShortcut(input)) {
       event.preventDefault();
@@ -974,13 +1032,21 @@ function configureChromeView(name, fileName) {
   return view;
 }
 
+// A injeção roda na página do provedor, longe do processo principal: a flag de
+// debug viaja junto com o script para que ela também fique muda quando instalado.
+function runInjection(contents, script) {
+  return contents.executeJavaScript(
+    `window.__chatClientDebug = ${JSON.stringify(debugMode)};\n${script}`
+  );
+}
+
 function injectAppApprovals() {
   const view = providerViews.get('chatgpt');
   if (!view || view.webContents.isDestroyed()) {
     return;
   }
 
-  view.webContents.executeJavaScript(APP_APPROVALS_SCRIPT)
+  runInjection(view.webContents, APP_APPROVALS_SCRIPT)
     .then(() => syncAppApprovalsConfig())
     .catch(() => {
       // Navigation can briefly make the renderer unavailable; dom-ready retries it.
@@ -1097,7 +1163,7 @@ function injectAppReasoningControl() {
     return;
   }
 
-  view.webContents.executeJavaScript(APP_REASONING_SCRIPT)
+  runInjection(view.webContents, APP_REASONING_SCRIPT)
     .then(() => syncAppReasoningConfig())
     .catch(() => {
       // Navigation can briefly make the renderer unavailable; dom-ready retries it.
@@ -1115,7 +1181,7 @@ function syncAppReasoningConfig() {
     `window.__chatClientAppReasoning?.setLevel(${level})`
   ).then((applied) => {
     if (applied === false) {
-      console.warn(`[app-reasoning] não foi possível aplicar o nível ${appReasoningLevel} no seletor nativo`);
+      log.warn(`app-reasoning: não foi possível aplicar o nível ${appReasoningLevel} no seletor nativo`);
     }
   }).catch(() => {});
 }
@@ -1373,6 +1439,8 @@ function createWindow() {
     }
   });
 
+  forwardViewConsole(mainWindow.webContents, 'shell', { includeViewErrors: true });
+
   syncLayoutToWindowContent();
 
   // Só carrega os providers do modo atual; os demais são criados sob demanda.
@@ -1464,6 +1532,7 @@ function createWindow() {
 registerIpc();
 
 app.whenReady().then(() => {
+  log.info('modo debug ativo: execução a partir do código-fonte');
   loadSessionState();
   createWindow();
 

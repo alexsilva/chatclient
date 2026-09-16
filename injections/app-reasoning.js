@@ -1,5 +1,5 @@
 (() => {
-  const API_KEY = '__chatClientReasoningControl';
+  const API_KEY = '__chatClientAppReasoning';
   const API_VERSION = 6;
   // Posições do slider nativo de "Potência" do ChatGPT.
   // 0 troca para o modelo instantâneo (sem raciocínio); 1-3 são esforços do thinking.

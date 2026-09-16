@@ -1,11 +1,11 @@
 (() => {
   const bridge = window.chatClient;
   const modeLabel = document.getElementById('modeLabel');
-  const quimeraButton = document.getElementById('quimeraButton');
+  const approvalsButton = document.getElementById('approvalsButton');
   const refreshButton = document.getElementById('refreshButton');
   let currentState = {
     mode: 'chatgpt',
-    quimeraAutoApproveEnabled: true
+    appApprovalsEnabled: true
   };
 
   function render(state) {
@@ -16,16 +16,16 @@
       compare: 'Comparar'
     };
     modeLabel.textContent = labels[currentState.mode] || 'ChatGPT';
-    quimeraButton.classList.toggle('active', currentState.quimeraAutoApproveEnabled);
-    quimeraButton.setAttribute('aria-pressed', String(currentState.quimeraAutoApproveEnabled));
+    approvalsButton.classList.toggle('active', currentState.appApprovalsEnabled);
+    approvalsButton.setAttribute('aria-pressed', String(currentState.appApprovalsEnabled));
   }
 
-  quimeraButton.addEventListener('click', async () => {
+  approvalsButton.addEventListener('click', async () => {
     const result = await bridge
-      .setQuimeraAutoApprove(!currentState.quimeraAutoApproveEnabled)
+      .setAppApprovalsEnabled(!currentState.appApprovalsEnabled)
       .catch(() => null);
     if (result) {
-      render({ quimeraAutoApproveEnabled: result.enabled });
+      render(result);
     }
   });
 

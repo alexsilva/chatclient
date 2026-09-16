@@ -19,11 +19,20 @@ Os provedores permanecem vivos ao alternar entre os modos, evitando reload desne
 - `Alt+3`: Comparar
 - `F5` ou `Ctrl+R`: recarrega o provedor ativo; no modo Comparar recarrega ambos
 
-## Quimera
+## Aprovação automática de apps
 
-O ChatClient mantém a automação de auto-aprovação da Quimera para o ChatGPT. O controle visual fica no shell do aplicativo, enquanto a automação é injetada apenas no `WebContentsView` do ChatGPT.
+O ChatClient responde pelos pedidos de permissão que os apps do ChatGPT (Quimera, conectores, MCPs) mostram no meio da conversa. A automação é injetada apenas no `WebContentsView` do ChatGPT; o botão de escudo no shell é a chave geral.
 
-O toggle também está disponível em **Configurações**.
+Em **Configurações**, cada app tem sua própria política:
+
+- **Nome do app** — como ele aparece no texto do pedido. A comparação ignora acentos e caixa.
+- **Ativa** — sem isso, os pedidos daquele app ficam esperando por você.
+- **Atraso** — tempo entre detectar o pedido e responder, de 0 a 30 s.
+- **Escopo** — `Somente esta chamada` clica em *Permitir*; `Toda a conversa` abre o menu ao lado do botão e escolhe a opção de conversa, quando o ChatGPT a oferece.
+
+A política **Outros apps** é o curinga: vale para todo app sem política própria. Ela nasce desligada, porque aprovar apps que ninguém nomeou é o escopo mais amplo possível.
+
+Quando há políticas concorrentes, a mais específica vence: um app com política própria desligada continua esperando por você mesmo com o curinga ligado.
 
 ## Desenvolvimento
 

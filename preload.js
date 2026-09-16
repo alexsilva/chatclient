@@ -9,14 +9,16 @@ contextBridge.exposeInMainWorld('chatClient', {
   updateLayout: (layout) => ipcRenderer.invoke('chatclient:update-layout', layout),
   refresh: () => ipcRenderer.invoke('chatclient:refresh'),
   openSettings: () => ipcRenderer.invoke('chatclient:open-settings'),
-  setQuimeraAutoApprove: (enabled) =>
-    ipcRenderer.invoke('chatclient:set-quimera-auto-approve', enabled),
-  setQuimeraApprovalDelay: (delayMs) =>
-    ipcRenderer.invoke('chatclient:set-quimera-approval-delay', delayMs),
-  setQuimeraApprovalScope: (scope) =>
-    ipcRenderer.invoke('chatclient:set-quimera-approval-scope', scope),
-  setChatgptReasoningLevel: (level) =>
-    ipcRenderer.invoke('chatclient:set-chatgpt-reasoning-level', level),
+  setAppApprovalsEnabled: (enabled) =>
+    ipcRenderer.invoke('chatclient:set-app-approvals-enabled', enabled),
+  addAppApprovalPolicy: (name) =>
+    ipcRenderer.invoke('chatclient:add-app-approval-policy', name),
+  updateAppApprovalPolicy: (id, patch) =>
+    ipcRenderer.invoke('chatclient:update-app-approval-policy', id, patch),
+  removeAppApprovalPolicy: (id) =>
+    ipcRenderer.invoke('chatclient:remove-app-approval-policy', id),
+  setAppReasoningLevel: (level) =>
+    ipcRenderer.invoke('chatclient:set-app-reasoning-level', level),
   setRestoreWorkspace: (enabled) =>
     ipcRenderer.invoke('chatclient:set-restore-workspace', enabled),
   setShellOverlay: (visible) => ipcRenderer.invoke('chatclient:set-shell-overlay', visible),

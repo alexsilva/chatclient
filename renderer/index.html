@@ -38,8 +38,8 @@
       </div>
 
       <div class="toolbar-actions">
-        <button class="tool-button icon-only active" id="quimeraButton" aria-pressed="true" title="Auto-aprovar Quimera" aria-label="Auto-aprovar Quimera">
-          <svg class="quimera-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <button class="tool-button icon-only active" id="approvalsButton" aria-pressed="true" title="Aprovação automática de apps" aria-label="Aprovação automática de apps">
+          <svg class="approvals-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
             <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
             <path d="M9 12l2 2 4-4"/>
           </svg>
@@ -72,37 +72,25 @@
         </div>
         <div class="setting-row">
           <div>
-            <strong>Auto-aprovar Quimera</strong>
-            <p>Aplica a automação somente aos prompts de permissão identificados como Quimera no ChatGPT.</p>
+            <strong>Aprovação automática de apps</strong>
+            <p>Chave geral das políticas abaixo. Desligada, todo pedido de permissão do ChatGPT espera por você.</p>
           </div>
-          <button class="switch active" id="quimeraSwitch" role="switch" aria-checked="true"><span></span></button>
+          <button class="switch active" id="approvalsSwitch" role="switch" aria-checked="true"><span></span></button>
         </div>
-        <div class="setting-row">
-          <div>
-            <strong>Atraso para aprovar</strong>
-            <p>Tempo fixo entre detectar a permissão da Quimera e clicar em Permitir.</p>
-          </div>
-          <label class="setting-number-control" for="quimeraDelayInput">
-            <input class="setting-number" id="quimeraDelayInput" type="number" min="0" max="30" step="0.5" value="3">
-            <span>s</span>
-          </label>
-        </div>
-        <div class="setting-row">
-          <div>
-            <strong>Escopo da aprovação</strong>
-            <p>Usa o menu ao lado de Permitir para liberar a Quimera na conversa inteira, quando o ChatGPT oferecer essa opção.</p>
-          </div>
-          <select class="setting-select" id="quimeraScopeSelect" aria-label="Escopo da aprovação da Quimera">
-            <option value="once" selected>Somente esta chamada</option>
-            <option value="conversation">Toda a conversa</option>
-          </select>
+        <div class="policy-section" id="policySection">
+          <div class="policy-list" id="policyList"></div>
+          <form class="policy-add" id="policyForm">
+            <input class="setting-input" id="policyNameInput" type="text" maxlength="60" autocomplete="off"
+                   placeholder="Nome do app no ChatGPT" aria-label="Nome do app no ChatGPT">
+            <button class="tool-button" type="submit">Adicionar</button>
+          </form>
         </div>
         <div class="setting-row">
           <div>
             <strong>Raciocínio do ChatGPT</strong>
             <p>Aplicado ao seletor de potência do ChatGPT ao carregar a página. Depois, pode ser alterado normalmente dentro do ChatGPT.</p>
           </div>
-          <select class="setting-select" id="chatgptReasoningSelect" aria-label="Nível padrão de raciocínio do ChatGPT">
+          <select class="setting-select" id="appReasoningSelect" aria-label="Nível padrão de raciocínio do ChatGPT">
             <option value="low">Instantâneo</option>
             <option value="medium">Médio</option>
             <option value="high" selected>Alto</option>

@@ -1,12 +1,16 @@
 (() => {
-  const API_KEY = '__chatClientQuimeraAutoApprove';
-  const TOOL_NAME = 'quimera';
+  const API_KEY = '__chatClientAppApprovals';
+  const LEGACY_API_KEY = '__chatClientQuimeraAutoApprove';
+  const VERSION = 1;
+  // Política curinga: vale para todo app que não tem política própria.
+  const CATCH_ALL_POLICY_ID = '*';
   const ALLOW_LABELS = new Set(['permitir', 'allow']);
   const PROMPT_PHRASES = ['permitir que', 'allow '];
   const MAX_CONTAINER_TEXT_LENGTH = 6000;
   const MAX_ANCESTOR_DEPTH = 14;
-  const DEFAULT_CLICK_DELAY_MS = 3000;
-  const MAX_CLICK_DELAY_MS = 30000;
+  const MAX_PROMPT_EXPANSION_DEPTH = 4;
+  const DEFAULT_DELAY_MS = 3000;
+  const MAX_DELAY_MS = 30000;
   const SCAN_DEBOUNCE_MS = 500;
   const BUTTON_SELECTOR = 'button, [role="button"]';
   const MENU_TRIGGER_SELECTOR = '[aria-haspopup="menu"]';
@@ -19,21 +23,21 @@
   // então o escopo é reconhecido por padrão de texto em vez de string fixa.
   const CONVERSATION_OPTION_PATTERN = /convers|sess[ãa]o|session|(this|neste|este) chat/i;
   const BROADER_SCOPE_PATTERN = /\ball\b|todas|todos|sempre|always|qualquer|every/i;
-  const LOG_PREFIX = '[chatclient:quimera]';
+  const LOG_PREFIX = '[chatclient:approvals]';
 
   const previous = window[API_KEY];
-  if (previous?.version === 3) {
+  if (previous?.version === VERSION) {
     return;
   }
 
   // Uma versão anterior mantém seu próprio observer vivo nesta página; desligá-la
   // evita que as duas automações disputem o mesmo prompt de permissão.
   previous?.setEnabled?.(false);
+  window[LEGACY_API_KEY]?.setEnabled?.(false);
 
   const state = {
     enabled: true,
-    delayMs: DEFAULT_CLICK_DELAY_MS,
-    scope: DEFAULT_SCOPE,
+    policies: [],
     processedButtons: new WeakSet(),
     approvalQueue: Promise.resolve()
   };
@@ -41,17 +45,51 @@
   function normalizeDelayMs(value) {
     const numeric = Number(value);
     if (!Number.isFinite(numeric)) {
-      return DEFAULT_CLICK_DELAY_MS;
+      return DEFAULT_DELAY_MS;
     }
-    return Math.min(MAX_CLICK_DELAY_MS, Math.max(0, Math.round(numeric)));
+    return Math.min(MAX_DELAY_MS, Math.max(0, Math.round(numeric)));
   }
 
-  function normalizeScope(value) {
-    return SCOPES.has(value) ? value : DEFAULT_SCOPE;
+  // Nomes de app são digitados pelo usuário e o prompt vem do ChatGPT: comparar
+  // sem acento e sem caixa evita que "Quimerá"/"QUIMERA" deixem de casar.
+  function foldText(value) {
+    return String(value)
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .trim()
+      .toLowerCase();
   }
 
-  function normalizedText(element) {
-    return (element.textContent || '').trim().toLowerCase();
+  function elementText(element) {
+    return foldText(element.textContent || '');
+  }
+
+  function normalizePolicy(raw) {
+    if (!raw || typeof raw !== 'object' || typeof raw.id !== 'string' || !raw.id) {
+      return null;
+    }
+
+    const name = typeof raw.name === 'string' ? raw.name : raw.id;
+    const catchAll = raw.id === CATCH_ALL_POLICY_ID;
+    const match = catchAll ? '' : foldText(name);
+
+    if (!catchAll && !match) {
+      return null;
+    }
+
+    return {
+      id: raw.id,
+      name,
+      match,
+      catchAll,
+      enabled: raw.enabled !== false,
+      delayMs: normalizeDelayMs(raw.delayMs),
+      scope: SCOPES.has(raw.scope) ? raw.scope : DEFAULT_SCOPE
+    };
+  }
+
+  function findPolicy(policyId) {
+    return state.policies.find((policy) => policy.id === policyId) || null;
   }
 
   function isDisabled(element) {
@@ -62,25 +100,65 @@
     return new Promise((resolve) => setTimeout(resolve, ms));
   }
 
-  function findQuimeraContainer(element) {
-    let container = element;
+  function isApprovalPrompt(text) {
+    return (
+      text.length <= MAX_CONTAINER_TEXT_LENGTH &&
+      PROMPT_PHRASES.some((phrase) => text.includes(phrase))
+    );
+  }
+
+  function containsSingleAllowButton(container) {
+    let found = 0;
+
+    for (const button of container.querySelectorAll(BUTTON_SELECTOR)) {
+      if (ALLOW_LABELS.has(elementText(button)) && ++found > 1) {
+        return false;
+      }
+    }
+
+    return true;
+  }
+
+  // O app dono do prompt é identificado pelo nome no texto do balão de permissão;
+  // sem política nomeada, o pedido cai no curinga (se o usuário o tiver ligado).
+  function resolvePolicy(allowButton) {
+    let container = allowButton;
+    let promptDepth = -1;
 
     for (let depth = 0; depth < MAX_ANCESTOR_DEPTH && container; depth += 1) {
-      const text = normalizedText(container);
-      const hasPromptPhrase = PROMPT_PHRASES.some((phrase) => text.includes(phrase));
+      // Um ancestral que já engloba outro pedido mistura os dois textos e deixaria
+      // a política de um app decidir pelo prompt do outro.
+      if (container !== allowButton && !containsSingleAllowButton(container)) {
+        break;
+      }
 
-      if (
-        text.length <= MAX_CONTAINER_TEXT_LENGTH &&
-        text.includes(TOOL_NAME) &&
-        hasPromptPhrase
-      ) {
-        return container;
+      const text = elementText(container);
+
+      if (isApprovalPrompt(text)) {
+        if (promptDepth === -1) {
+          promptDepth = depth;
+        }
+
+        const named = state.policies.find(
+          (policy) => !policy.catchAll && text.includes(policy.match)
+        );
+        if (named) {
+          return named;
+        }
+      }
+
+      // O nome do app costuma estar no mesmo bloco do texto do pedido; alguns
+      // níveis acima ainda são o balão, mais que isso já é a conversa em volta.
+      if (promptDepth !== -1 && depth - promptDepth >= MAX_PROMPT_EXPANSION_DEPTH) {
+        break;
       }
 
       container = container.parentElement;
     }
 
-    return null;
+    return promptDepth !== -1
+      ? state.policies.find((policy) => policy.catchAll) || null
+      : null;
   }
 
   // O ChatGPT troca o botão "Permitir" por um split button quando a ação traz
@@ -151,12 +229,12 @@
   // uma opção desconhecida poderia conceder um escopo mais amplo que o pedido.
   function pickConversationOption(items) {
     return items.find((item) => {
-      const text = normalizedText(item);
+      const text = elementText(item);
       return CONVERSATION_OPTION_PATTERN.test(text) && !BROADER_SCOPE_PATTERN.test(text);
     }) || null;
   }
 
-  async function approveForConversation(allowButton) {
+  async function approveForConversation(allowButton, policy) {
     const trigger = findScopeMenuTrigger(allowButton);
     if (!trigger) {
       return false;
@@ -166,18 +244,18 @@
     const items = await waitForScopeMenuItems(trigger);
 
     if (items.length === 0) {
-      console.warn(LOG_PREFIX, 'menu de escopo não abriu; aprovando apenas esta chamada');
+      console.warn(LOG_PREFIX, `${policy.name}: menu de escopo não abriu; aprovando apenas esta chamada`);
       return false;
     }
 
     const option = pickConversationOption(items);
     if (!option) {
       closeScopeMenu();
-      console.warn(LOG_PREFIX, 'nenhuma opção de conversa reconhecida; aprovando apenas esta chamada');
+      console.warn(LOG_PREFIX, `${policy.name}: nenhuma opção de conversa reconhecida; aprovando apenas esta chamada`);
       return false;
     }
 
-    console.info(LOG_PREFIX, 'aprovando para a conversa:', normalizedText(option));
+    console.info(LOG_PREFIX, `${policy.name}: aprovando para a conversa —`, elementText(option));
     option.click();
     return true;
   }
@@ -186,12 +264,15 @@
     return state.enabled && candidate.isConnected && !isDisabled(candidate);
   }
 
-  async function approve(candidate) {
-    if (!canApprove(candidate)) {
+  async function approve(candidate, policyId) {
+    // A política é relida aqui: ela pode ter sido desligada ou removida enquanto
+    // o atraso corria.
+    const policy = findPolicy(policyId);
+    if (!policy || !policy.enabled || !canApprove(candidate)) {
       return;
     }
 
-    if (state.scope === 'conversation' && (await approveForConversation(candidate))) {
+    if (policy.scope === 'conversation' && (await approveForConversation(candidate, policy))) {
       return;
     }
 
@@ -201,15 +282,15 @@
       return;
     }
 
-    console.info(LOG_PREFIX, 'aprovando prompt da Quimera');
+    console.info(LOG_PREFIX, `${policy.name}: aprovando esta chamada`);
     candidate.click();
   }
 
   // Aprovações são serializadas: dois menus de escopo abertos ao mesmo tempo se
   // fechariam mutuamente.
-  function enqueueApproval(candidate) {
+  function enqueueApproval(candidate, policyId) {
     state.approvalQueue = state.approvalQueue
-      .then(() => approve(candidate))
+      .then(() => approve(candidate, policyId))
       .catch((error) => {
         console.warn(LOG_PREFIX, 'falha ao aprovar prompt:', error);
       });
@@ -225,16 +306,23 @@
         continue;
       }
 
-      if (!ALLOW_LABELS.has(normalizedText(candidate))) {
+      if (!ALLOW_LABELS.has(elementText(candidate)) || isDisabled(candidate)) {
         continue;
       }
 
-      if (!findQuimeraContainer(candidate) || isDisabled(candidate)) {
+      const policy = resolvePolicy(candidate);
+      if (!policy) {
+        continue;
+      }
+
+      // Prompts sem aprovação automática ficam sem marca: se a política for
+      // ligada com o pedido na tela, o próximo scan ainda o encontra.
+      if (!policy.enabled) {
         continue;
       }
 
       state.processedButtons.add(candidate);
-      setTimeout(() => enqueueApproval(candidate), state.delayMs);
+      setTimeout(() => enqueueApproval(candidate, policy.id), policy.delayMs);
     }
   }
 
@@ -280,7 +368,7 @@
   observer.observe(document.documentElement, { childList: true, subtree: true });
 
   window[API_KEY] = {
-    version: 3,
+    version: VERSION,
     setEnabled(enabled) {
       state.enabled = Boolean(enabled);
       if (state.enabled) {
@@ -290,17 +378,20 @@
     getEnabled() {
       return state.enabled;
     },
-    setDelayMs(delayMs) {
-      state.delayMs = normalizeDelayMs(delayMs);
+    setPolicies(policies) {
+      state.policies = Array.isArray(policies)
+        ? policies.map(normalizePolicy).filter(Boolean)
+        : [];
+      scheduleScan();
     },
-    getDelayMs() {
-      return state.delayMs;
-    },
-    setScope(scope) {
-      state.scope = normalizeScope(scope);
-    },
-    getScope() {
-      return state.scope;
+    getPolicies() {
+      return state.policies.map(({ id, name, enabled, delayMs, scope }) => ({
+        id,
+        name,
+        enabled,
+        delayMs,
+        scope
+      }));
     }
   };
 

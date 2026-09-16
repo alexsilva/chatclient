@@ -8,24 +8,32 @@
   const compareHeader = document.getElementById('compareHeader');
   const compareDivider = document.getElementById('compareDivider');
   const refreshButton = document.getElementById('refreshButton');
-  const quimeraButton = document.getElementById('quimeraButton');
-  const quimeraSwitch = document.getElementById('quimeraSwitch');
-  const quimeraDelayInput = document.getElementById('quimeraDelayInput');
-  const quimeraScopeSelect = document.getElementById('quimeraScopeSelect');
-  const chatgptReasoningSelect = document.getElementById('chatgptReasoningSelect');
+  const approvalsButton = document.getElementById('approvalsButton');
+  const approvalsSwitch = document.getElementById('approvalsSwitch');
+  const policySection = document.getElementById('policySection');
+  const policyList = document.getElementById('policyList');
+  const policyForm = document.getElementById('policyForm');
+  const policyNameInput = document.getElementById('policyNameInput');
+  const appReasoningSelect = document.getElementById('appReasoningSelect');
   const restoreWorkspaceSwitch = document.getElementById('restoreWorkspaceSwitch');
   const settingsButton = document.getElementById('settingsButton');
   const settingsPanel = document.getElementById('settingsPanel');
   const closeSettingsButton = document.getElementById('closeSettingsButton');
   const toast = document.getElementById('toast');
 
+  const CATCH_ALL_POLICY_ID = '*';
+  const CATCH_ALL_POLICY_HINT =
+    'Vale para todo app que peça permissão e não tenha política própria — inclusive os que você ainda não cadastrou.';
+
   const state = {
     mode: 'chatgpt',
     splitRatio: 0.5,
-    quimeraAutoApproveEnabled: true,
-    quimeraApprovalDelayMs: 3000,
-    quimeraApprovalScope: 'once',
-    chatgptReasoningLevel: 'high',
+    appApprovalsEnabled: true,
+    appApprovalPolicies: [
+      { id: 'quimera', name: 'Quimera', enabled: true, delayMs: 3000, scope: 'once' },
+      { id: CATCH_ALL_POLICY_ID, name: 'Outros apps', enabled: false, delayMs: 3000, scope: 'once' }
+    ],
+    appReasoningLevel: 'high',
     restoreWorkspaceEnabled: true,
     railVisible: false,
     toolbarVisible: false
@@ -41,6 +49,95 @@
     toast.classList.add('visible');
     clearTimeout(toastTimer);
     toastTimer = setTimeout(() => toast.classList.remove('visible'), 1800);
+  }
+
+  const policyElements = new Map();
+
+  function createPolicyElement(policy) {
+    const isCatchAll = policy.id === CATCH_ALL_POLICY_ID;
+    const element = document.createElement('article');
+    element.className = 'policy-item';
+    element.dataset.policyId = policy.id;
+    element.innerHTML = `
+      <div class="policy-head">
+        <strong class="policy-name"></strong>
+        <button class="switch" type="button" role="switch" data-action="toggle"><span></span></button>
+        <button class="policy-remove" type="button" data-action="remove" title="Remover app">×</button>
+      </div>
+      <p class="policy-hint"></p>
+      <div class="policy-controls">
+        <label class="policy-field">
+          <span>Atraso</span>
+          <span class="setting-number-control">
+            <input class="setting-number" type="number" min="0" max="30" step="0.5" data-action="delay">
+            <span>s</span>
+          </span>
+        </label>
+        <label class="policy-field">
+          <span>Escopo</span>
+          <select class="setting-select" data-action="scope">
+            <option value="once">Somente esta chamada</option>
+            <option value="conversation">Toda a conversa</option>
+          </select>
+        </label>
+      </div>
+    `;
+
+    const hint = element.querySelector('.policy-hint');
+    hint.hidden = !isCatchAll;
+    hint.textContent = isCatchAll ? CATCH_ALL_POLICY_HINT : '';
+    // O curinga não é um app cadastrado: não há o que remover.
+    element.querySelector('[data-action="remove"]').hidden = isCatchAll;
+
+    return element;
+  }
+
+  function updatePolicyElement(element, policy) {
+    const toggle = element.querySelector('[data-action="toggle"]');
+    const delayInput = element.querySelector('[data-action="delay"]');
+    const scopeSelect = element.querySelector('[data-action="scope"]');
+
+    element.classList.toggle('off', !policy.enabled);
+    element.querySelector('.policy-name').textContent = policy.name;
+    toggle.classList.toggle('active', policy.enabled);
+    toggle.setAttribute('aria-checked', String(policy.enabled));
+    toggle.setAttribute('aria-label', `Aprovar ${policy.name} automaticamente`);
+    element.querySelector('[data-action="remove"]').setAttribute('aria-label', `Remover ${policy.name}`);
+
+    if (document.activeElement !== delayInput) {
+      delayInput.value = String(policy.delayMs / 1000);
+    }
+
+    if (document.activeElement !== scopeSelect) {
+      scopeSelect.value = policy.scope;
+    }
+  }
+
+  // Os nós são reaproveitados entre renders: recriar a lista a cada evento de
+  // estado tiraria o foco de quem estivesse editando um atraso ou um escopo.
+  function renderPolicies() {
+    state.appApprovalPolicies.forEach((policy, index) => {
+      let element = policyElements.get(policy.id);
+
+      if (!element) {
+        element = createPolicyElement(policy);
+        policyElements.set(policy.id, element);
+      }
+
+      updatePolicyElement(element, policy);
+
+      if (policyList.children[index] !== element) {
+        policyList.insertBefore(element, policyList.children[index] || null);
+      }
+    });
+
+    const ids = new Set(state.appApprovalPolicies.map((policy) => policy.id));
+    for (const [id, element] of policyElements) {
+      if (!ids.has(id)) {
+        element.remove();
+        policyElements.delete(id);
+      }
+    }
   }
 
   function renderState() {
@@ -66,25 +163,19 @@
     compareDivider.classList.toggle('visible', comparing);
     compareDivider.setAttribute('aria-hidden', String(!comparing));
 
-    quimeraButton.classList.toggle('active', state.quimeraAutoApproveEnabled);
-    quimeraButton.setAttribute('aria-pressed', String(state.quimeraAutoApproveEnabled));
-    quimeraButton.title = state.quimeraAutoApproveEnabled
-      ? 'Auto-aprovar Quimera: ativado'
-      : 'Auto-aprovar Quimera: desativado';
+    approvalsButton.classList.toggle('active', state.appApprovalsEnabled);
+    approvalsButton.setAttribute('aria-pressed', String(state.appApprovalsEnabled));
+    approvalsButton.title = state.appApprovalsEnabled
+      ? 'Aprovação automática de apps: ativada'
+      : 'Aprovação automática de apps: desativada';
 
-    quimeraSwitch.classList.toggle('active', state.quimeraAutoApproveEnabled);
-    quimeraSwitch.setAttribute('aria-checked', String(state.quimeraAutoApproveEnabled));
+    approvalsSwitch.classList.toggle('active', state.appApprovalsEnabled);
+    approvalsSwitch.setAttribute('aria-checked', String(state.appApprovalsEnabled));
+    policySection.classList.toggle('inactive', !state.appApprovalsEnabled);
+    renderPolicies();
 
-    if (document.activeElement !== quimeraDelayInput) {
-      quimeraDelayInput.value = String(state.quimeraApprovalDelayMs / 1000);
-    }
-
-    if (document.activeElement !== quimeraScopeSelect) {
-      quimeraScopeSelect.value = state.quimeraApprovalScope;
-    }
-
-    if (document.activeElement !== chatgptReasoningSelect) {
-      chatgptReasoningSelect.value = state.chatgptReasoningLevel;
+    if (document.activeElement !== appReasoningSelect) {
+      appReasoningSelect.value = state.appReasoningLevel;
     }
 
     restoreWorkspaceSwitch.classList.toggle('active', state.restoreWorkspaceEnabled);
@@ -182,8 +273,8 @@
     }
   }
 
-  async function setQuimeraEnabled(enabled) {
-    state.quimeraAutoApproveEnabled = Boolean(enabled);
+  async function setApprovalsEnabled(enabled) {
+    state.appApprovalsEnabled = Boolean(enabled);
     renderState();
 
     if (!isElectron) {
@@ -191,20 +282,28 @@
     }
 
     try {
-      const result = await bridge.setQuimeraAutoApprove(state.quimeraAutoApproveEnabled);
-      state.quimeraAutoApproveEnabled = result.enabled;
+      Object.assign(state, await bridge.setAppApprovalsEnabled(state.appApprovalsEnabled));
       renderState();
     } catch {
-      showToast('Não foi possível atualizar a automação da Quimera.');
+      showToast('Não foi possível atualizar a aprovação automática.');
     }
   }
 
-  async function setQuimeraApprovalDelay(seconds) {
+  function secondsToDelayMs(seconds) {
     const numeric = Number(seconds);
-    const normalizedSeconds = Number.isFinite(numeric)
-      ? Math.min(30, Math.max(0, numeric))
-      : 3;
-    state.quimeraApprovalDelayMs = Math.round(normalizedSeconds * 1000);
+    const normalized = Number.isFinite(numeric) ? Math.min(30, Math.max(0, numeric)) : 3;
+    return Math.round(normalized * 1000);
+  }
+
+  async function updatePolicy(id, patch) {
+    const previousPolicies = state.appApprovalPolicies;
+    if (!previousPolicies.some((policy) => policy.id === id)) {
+      return;
+    }
+
+    state.appApprovalPolicies = previousPolicies.map((policy) =>
+      policy.id === id ? { ...policy, ...patch } : policy
+    );
     renderState();
 
     if (!isElectron) {
@@ -212,21 +311,43 @@
     }
 
     try {
-      const result = await bridge.setQuimeraApprovalDelay(state.quimeraApprovalDelayMs);
-      state.quimeraApprovalDelayMs = result.delayMs;
+      Object.assign(state, await bridge.updateAppApprovalPolicy(id, patch));
       renderState();
     } catch {
-      showToast('Não foi possível atualizar o atraso de aprovação.');
+      state.appApprovalPolicies = previousPolicies;
+      renderState();
+      showToast('Não foi possível atualizar a política do app.');
     }
   }
 
-  async function setQuimeraApprovalScope(scope) {
-    if (!['once', 'conversation'].includes(scope)) {
+  async function addPolicy(name) {
+    const appName = name.trim();
+    if (!appName) {
       return;
     }
 
-    const previousScope = state.quimeraApprovalScope;
-    state.quimeraApprovalScope = scope;
+    // Mesma comparação do processo principal, para avisar aqui em vez de deixar
+    // o IPC recusar com uma mensagem genérica.
+    const foldName = (value) => value.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+    const previousPolicies = state.appApprovalPolicies;
+    const duplicated = previousPolicies.some(
+      (policy) => policy.id !== CATCH_ALL_POLICY_ID && foldName(policy.name) === foldName(appName)
+    );
+
+    if (duplicated) {
+      showToast(`${appName} já tem uma política.`);
+      return;
+    }
+
+    // O id definitivo vem do processo principal; até lá o item aparece com um
+    // provisório para a lista não piscar.
+    const optimistic = { id: `pending:${appName}`, name: appName, enabled: true, delayMs: 3000, scope: 'once' };
+    state.appApprovalPolicies = [
+      ...previousPolicies.filter((policy) => policy.id !== CATCH_ALL_POLICY_ID),
+      optimistic,
+      ...previousPolicies.filter((policy) => policy.id === CATCH_ALL_POLICY_ID)
+    ];
+    policyNameInput.value = '';
     renderState();
 
     if (!isElectron) {
@@ -234,13 +355,31 @@
     }
 
     try {
-      const result = await bridge.setQuimeraApprovalScope(scope);
-      state.quimeraApprovalScope = result.scope;
+      Object.assign(state, await bridge.addAppApprovalPolicy(appName));
       renderState();
     } catch {
-      state.quimeraApprovalScope = previousScope;
+      state.appApprovalPolicies = previousPolicies;
       renderState();
-      showToast('Não foi possível atualizar o escopo da aprovação.');
+      showToast('Não foi possível adicionar o app.');
+    }
+  }
+
+  async function removePolicy(id) {
+    const previousPolicies = state.appApprovalPolicies;
+    state.appApprovalPolicies = previousPolicies.filter((policy) => policy.id !== id);
+    renderState();
+
+    if (!isElectron) {
+      return;
+    }
+
+    try {
+      Object.assign(state, await bridge.removeAppApprovalPolicy(id));
+      renderState();
+    } catch {
+      state.appApprovalPolicies = previousPolicies;
+      renderState();
+      showToast('Não foi possível remover o app.');
     }
   }
 
@@ -261,13 +400,13 @@
     }
   }
 
-  async function setChatgptReasoningLevel(level) {
+  async function setAppReasoningLevel(level) {
     if (!['low', 'medium', 'high', 'extra-high'].includes(level)) {
       return;
     }
 
-    const previousLevel = state.chatgptReasoningLevel;
-    state.chatgptReasoningLevel = level;
+    const previousLevel = state.appReasoningLevel;
+    state.appReasoningLevel = level;
     renderState();
 
     if (!isElectron) {
@@ -275,11 +414,11 @@
     }
 
     try {
-      const result = await bridge.setChatgptReasoningLevel(level);
-      state.chatgptReasoningLevel = result.level;
+      const result = await bridge.setAppReasoningLevel(level);
+      state.appReasoningLevel = result.level;
       renderState();
     } catch {
-      state.chatgptReasoningLevel = previousLevel;
+      state.appReasoningLevel = previousLevel;
       renderState();
       showToast('Não foi possível atualizar o raciocínio do ChatGPT.');
     }
@@ -325,24 +464,51 @@
     }
   });
 
-  quimeraButton.addEventListener('click', () => {
-    setQuimeraEnabled(!state.quimeraAutoApproveEnabled);
+  approvalsButton.addEventListener('click', () => {
+    setApprovalsEnabled(!state.appApprovalsEnabled);
   });
 
-  quimeraSwitch.addEventListener('click', () => {
-    setQuimeraEnabled(!state.quimeraAutoApproveEnabled);
+  approvalsSwitch.addEventListener('click', () => {
+    setApprovalsEnabled(!state.appApprovalsEnabled);
   });
 
-  quimeraDelayInput.addEventListener('change', () => {
-    setQuimeraApprovalDelay(quimeraDelayInput.value);
+  // Delegação: os itens da lista são criados e descartados conforme as políticas.
+  policyList.addEventListener('click', (event) => {
+    const control = event.target.closest('[data-action]');
+    const id = control?.closest('.policy-item')?.dataset.policyId;
+    if (!id) {
+      return;
+    }
+
+    if (control.dataset.action === 'toggle') {
+      const policy = state.appApprovalPolicies.find((item) => item.id === id);
+      updatePolicy(id, { enabled: !policy?.enabled });
+    } else if (control.dataset.action === 'remove') {
+      removePolicy(id);
+    }
   });
 
-  quimeraScopeSelect.addEventListener('change', () => {
-    setQuimeraApprovalScope(quimeraScopeSelect.value);
+  policyList.addEventListener('change', (event) => {
+    const control = event.target.closest('[data-action]');
+    const id = control?.closest('.policy-item')?.dataset.policyId;
+    if (!id) {
+      return;
+    }
+
+    if (control.dataset.action === 'delay') {
+      updatePolicy(id, { delayMs: secondsToDelayMs(control.value) });
+    } else if (control.dataset.action === 'scope') {
+      updatePolicy(id, { scope: control.value });
+    }
   });
 
-  chatgptReasoningSelect.addEventListener('change', () => {
-    setChatgptReasoningLevel(chatgptReasoningSelect.value);
+  policyForm.addEventListener('submit', (event) => {
+    event.preventDefault();
+    addPolicy(policyNameInput.value);
+  });
+
+  appReasoningSelect.addEventListener('change', () => {
+    setAppReasoningLevel(appReasoningSelect.value);
   });
 
   restoreWorkspaceSwitch.addEventListener('click', () => {

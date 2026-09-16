@@ -48,19 +48,24 @@ const CHROME_REVEAL = {
   pollIntervalMs: 75,
   idlePollIntervalMs: 250
 };
-const DEFAULT_QUIMERA_APPROVAL_DELAY_MS = 3000;
-const MAX_QUIMERA_APPROVAL_DELAY_MS = 30000;
-const QUIMERA_APPROVAL_SCOPES = new Set(['once', 'conversation']);
-const DEFAULT_QUIMERA_APPROVAL_SCOPE = 'once';
-const CHATGPT_REASONING_LEVELS = new Set(['low', 'medium', 'high', 'extra-high']);
-const DEFAULT_CHATGPT_REASONING_LEVEL = 'high';
+const DEFAULT_APPROVAL_DELAY_MS = 3000;
+const MAX_APPROVAL_DELAY_MS = 30000;
+const APPROVAL_SCOPES = new Set(['once', 'conversation']);
+const DEFAULT_APPROVAL_SCOPE = 'once';
+const MAX_APPROVAL_POLICIES = 24;
+const MAX_APP_NAME_LENGTH = 60;
+// Política curinga: aplicada a qualquer app do ChatGPT sem política própria.
+const CATCH_ALL_POLICY_ID = '*';
+const CATCH_ALL_POLICY_NAME = 'Outros apps';
+const APP_REASONING_LEVELS = new Set(['low', 'medium', 'high', 'extra-high']);
+const DEFAULT_APP_REASONING_LEVEL = 'high';
 
-const QUIMERA_AUTO_APPROVE_SCRIPT = readFileSync(
-  join(__dirname, 'injections', 'quimera-auto-approve.js'),
+const APP_APPROVALS_SCRIPT = readFileSync(
+  join(__dirname, 'injections', 'app-approvals.js'),
   'utf8'
 );
-const CHATGPT_REASONING_SCRIPT = readFileSync(
-  join(__dirname, 'injections', 'chatgpt-reasoning.js'),
+const APP_REASONING_SCRIPT = readFileSync(
+  join(__dirname, 'injections', 'app-reasoning.js'),
   'utf8'
 );
 
@@ -69,9 +74,8 @@ let providerViews = new Map();
 let chromeViews = new Map();
 let mode = 'chatgpt';
 let layout = { ...DEFAULT_LAYOUT };
-let quimeraAutoApproveEnabled = true;
-let quimeraApprovalDelayMs = DEFAULT_QUIMERA_APPROVAL_DELAY_MS;
-let quimeraApprovalScope = DEFAULT_QUIMERA_APPROVAL_SCOPE;
+let appApprovalsEnabled = true;
+let appApprovalPolicies = defaultApprovalPolicies();
 let shellOverlayVisible = false;
 let railVisible = false;
 let toolbarVisible = false;
@@ -83,7 +87,7 @@ let sessionStatePath = null;
 let sessionSaveTimer = null;
 let restoredWindowState = null;
 let restoreWorkspaceEnabled = true;
-let chatgptReasoningLevel = DEFAULT_CHATGPT_REASONING_LEVEL;
+let appReasoningLevel = DEFAULT_APP_REASONING_LEVEL;
 let providerUrls = Object.fromEntries(
   Object.values(PROVIDERS).map((provider) => [provider.id, provider.url])
 );
@@ -98,20 +102,26 @@ function loadSessionState() {
       restoreWorkspaceEnabled = saved.restoreWorkspaceEnabled;
     }
 
-    if (typeof saved.quimeraAutoApproveEnabled === 'boolean') {
-      quimeraAutoApproveEnabled = saved.quimeraAutoApproveEnabled;
+    if (saved.appApprovals && typeof saved.appApprovals === 'object') {
+      if (typeof saved.appApprovals.enabled === 'boolean') {
+        appApprovalsEnabled = saved.appApprovals.enabled;
+      }
+
+      appApprovalPolicies = sanitizeApprovalPolicies(saved.appApprovals.policies);
+    } else {
+      // Sessões gravadas antes do plugin genérico: a automação era exclusiva da
+      // Quimera e o interruptor dela fazia o papel da chave geral.
+      if (typeof saved.quimeraAutoApproveEnabled === 'boolean') {
+        appApprovalsEnabled = saved.quimeraAutoApproveEnabled;
+      }
+
+      appApprovalPolicies = migrateLegacyApprovalPolicies(saved);
     }
 
-    if (Number.isFinite(saved.quimeraApprovalDelayMs)) {
-      quimeraApprovalDelayMs = normalizeQuimeraApprovalDelayMs(saved.quimeraApprovalDelayMs);
-    }
-
-    if (QUIMERA_APPROVAL_SCOPES.has(saved.quimeraApprovalScope)) {
-      quimeraApprovalScope = saved.quimeraApprovalScope;
-    }
-
-    if (CHATGPT_REASONING_LEVELS.has(saved.chatgptReasoningLevel)) {
-      chatgptReasoningLevel = saved.chatgptReasoningLevel;
+    // `chatgptReasoningLevel` é o nome anterior à padronização dos plugins.
+    const savedReasoningLevel = saved.appReasoningLevel ?? saved.chatgptReasoningLevel;
+    if (APP_REASONING_LEVELS.has(savedReasoningLevel)) {
+      appReasoningLevel = savedReasoningLevel;
     }
 
     // Geometria da janela é estado da aplicação, não do workspace.
@@ -164,14 +174,15 @@ function getPersistedWindowState() {
 
 function buildSessionState() {
   return {
-    version: 1,
+    version: 2,
     restoreWorkspaceEnabled,
     mode,
     splitRatio: layout.splitRatio,
-    quimeraAutoApproveEnabled,
-    quimeraApprovalDelayMs,
-    quimeraApprovalScope,
-    chatgptReasoningLevel,
+    appApprovals: {
+      enabled: appApprovalsEnabled,
+      policies: appApprovalPolicies.map((policy) => ({ ...policy }))
+    },
+    appReasoningLevel,
     providers: { ...providerUrls },
     window: getPersistedWindowState()
   };
@@ -200,12 +211,128 @@ function scheduleSessionSave(delayMs = 250) {
   }, delayMs);
 }
 
-function normalizeQuimeraApprovalDelayMs(value) {
+function normalizeApprovalDelayMs(value) {
   const numeric = Number(value);
   if (!Number.isFinite(numeric)) {
-    return DEFAULT_QUIMERA_APPROVAL_DELAY_MS;
+    return DEFAULT_APPROVAL_DELAY_MS;
   }
-  return Math.min(MAX_QUIMERA_APPROVAL_DELAY_MS, Math.max(0, Math.round(numeric)));
+  return Math.min(MAX_APPROVAL_DELAY_MS, Math.max(0, Math.round(numeric)));
+}
+
+function normalizeAppName(value) {
+  if (typeof value !== 'string') {
+    return '';
+  }
+  return value.trim().replace(/\s+/g, ' ').slice(0, MAX_APP_NAME_LENGTH);
+}
+
+function foldAppName(value) {
+  return value.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+}
+
+function createApprovalPolicy(id, name, overrides = {}) {
+  return {
+    id,
+    name,
+    enabled: overrides.enabled !== false,
+    delayMs: normalizeApprovalDelayMs(overrides.delayMs),
+    scope: APPROVAL_SCOPES.has(overrides.scope) ? overrides.scope : DEFAULT_APPROVAL_SCOPE
+  };
+}
+
+// Aprovar apps que o usuário nunca nomeou é o padrão mais amplo possível, então o
+// curinga nasce desligado mesmo quando o restante da configuração vem ligado.
+function createCatchAllPolicy(overrides = {}) {
+  return createApprovalPolicy(CATCH_ALL_POLICY_ID, CATCH_ALL_POLICY_NAME, {
+    ...overrides,
+    enabled: overrides.enabled === true
+  });
+}
+
+function defaultApprovalPolicies() {
+  return [createApprovalPolicy('quimera', 'Quimera'), createCatchAllPolicy()];
+}
+
+function migrateLegacyApprovalPolicies(saved) {
+  return [
+    createApprovalPolicy('quimera', 'Quimera', {
+      delayMs: saved.quimeraApprovalDelayMs,
+      scope: saved.quimeraApprovalScope
+    }),
+    createCatchAllPolicy()
+  ];
+}
+
+// O curinga é sempre o último da lista: a injeção só recorre a ele depois de
+// falhar em casar o prompt com uma política nomeada.
+function orderApprovalPolicies(policies) {
+  const named = policies.filter((policy) => policy.id !== CATCH_ALL_POLICY_ID);
+  const catchAll = policies.find((policy) => policy.id === CATCH_ALL_POLICY_ID);
+  return [...named, catchAll || createCatchAllPolicy()];
+}
+
+function toApprovalPolicyId(name) {
+  const slug = foldAppName(name)
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+  return slug || 'app';
+}
+
+function uniqueApprovalPolicyId(name) {
+  const base = toApprovalPolicyId(name);
+  let candidate = base;
+  let suffix = 2;
+
+  while (appApprovalPolicies.some((policy) => policy.id === candidate)) {
+    candidate = `${base}-${suffix}`;
+    suffix += 1;
+  }
+
+  return candidate;
+}
+
+function sanitizeApprovalPolicies(rawPolicies) {
+  if (!Array.isArray(rawPolicies)) {
+    return defaultApprovalPolicies();
+  }
+
+  const policies = [];
+  const ids = new Set();
+  let catchAll = null;
+
+  for (const raw of rawPolicies) {
+    if (!raw || typeof raw !== 'object') {
+      continue;
+    }
+
+    if (raw.id === CATCH_ALL_POLICY_ID) {
+      catchAll = catchAll || createCatchAllPolicy(raw);
+      continue;
+    }
+
+    const name = normalizeAppName(raw.name);
+    if (
+      !name ||
+      typeof raw.id !== 'string' ||
+      !raw.id ||
+      ids.has(raw.id) ||
+      policies.length >= MAX_APPROVAL_POLICIES
+    ) {
+      continue;
+    }
+
+    ids.add(raw.id);
+    policies.push(createApprovalPolicy(raw.id, name, raw));
+  }
+
+  return orderApprovalPolicies([...policies, catchAll || createCatchAllPolicy()]);
+}
+
+function getApprovalsState() {
+  return {
+    appApprovalsEnabled,
+    appApprovalPolicies: appApprovalPolicies.map((policy) => ({ ...policy }))
+  };
 }
 
 function getRestoredWindowOptions() {
@@ -255,10 +382,8 @@ function safeRectangle(value) {
 function buildRendererState() {
   return {
     mode,
-    quimeraAutoApproveEnabled,
-    quimeraApprovalDelayMs,
-    quimeraApprovalScope,
-    chatgptReasoningLevel,
+    ...getApprovalsState(),
+    appReasoningLevel,
     restoreWorkspaceEnabled
   };
 }
@@ -782,8 +907,8 @@ function configureProviderView(provider) {
 
   if (provider.id === 'chatgpt') {
     contents.on('dom-ready', () => {
-      injectQuimeraAutoApprove();
-      injectChatgptReasoningControl();
+      injectAppApprovals();
+      injectAppReasoningControl();
     });
   }
 
@@ -849,101 +974,160 @@ function configureChromeView(name, fileName) {
   return view;
 }
 
-function injectQuimeraAutoApprove() {
+function injectAppApprovals() {
   const view = providerViews.get('chatgpt');
   if (!view || view.webContents.isDestroyed()) {
     return;
   }
 
-  view.webContents.executeJavaScript(QUIMERA_AUTO_APPROVE_SCRIPT)
-    .then(() => syncQuimeraAutoApproveConfig())
+  view.webContents.executeJavaScript(APP_APPROVALS_SCRIPT)
+    .then(() => syncAppApprovalsConfig())
     .catch(() => {
       // Navigation can briefly make the renderer unavailable; dom-ready retries it.
     });
 }
 
-function syncQuimeraAutoApproveConfig() {
+function syncAppApprovalsConfig() {
   const view = providerViews.get('chatgpt');
   if (!view || view.webContents.isDestroyed()) {
     return;
   }
 
-  const enabled = JSON.stringify(quimeraAutoApproveEnabled);
-  const delayMs = JSON.stringify(quimeraApprovalDelayMs);
-  const scope = JSON.stringify(quimeraApprovalScope);
+  const policies = JSON.stringify(appApprovalPolicies);
+  const enabled = JSON.stringify(appApprovalsEnabled);
   view.webContents.executeJavaScript(
-    `window.__chatClientQuimeraAutoApprove?.setScope(${scope});` +
-    `window.__chatClientQuimeraAutoApprove?.setDelayMs(${delayMs});` +
-    `window.__chatClientQuimeraAutoApprove?.setEnabled(${enabled});`
+    `window.__chatClientAppApprovals?.setPolicies(${policies});` +
+    `window.__chatClientAppApprovals?.setEnabled(${enabled});`
   ).catch(() => {});
 }
 
-function setQuimeraAutoApprove(enabled, notify = true) {
-  quimeraAutoApproveEnabled = Boolean(enabled);
+function commitApprovalChange() {
   scheduleSessionSave();
-  syncQuimeraAutoApproveConfig();
-
-  if (notify) {
-    emitState();
-  }
-}
-
-function setQuimeraApprovalDelayMs(delayMs) {
-  quimeraApprovalDelayMs = normalizeQuimeraApprovalDelayMs(delayMs);
-  scheduleSessionSave();
-  syncQuimeraAutoApproveConfig();
+  syncAppApprovalsConfig();
   emitState();
 }
 
-function setQuimeraApprovalScope(scope) {
-  if (!QUIMERA_APPROVAL_SCOPES.has(scope)) {
+function setAppApprovalsEnabled(enabled) {
+  appApprovalsEnabled = Boolean(enabled);
+  commitApprovalChange();
+}
+
+function addAppApprovalPolicy(name) {
+  const appName = normalizeAppName(name);
+  if (!appName) {
+    return null;
+  }
+
+  const namedCount = appApprovalPolicies.filter((policy) => policy.id !== CATCH_ALL_POLICY_ID).length;
+  if (namedCount >= MAX_APPROVAL_POLICIES) {
+    return null;
+  }
+
+  // Dois apps com o mesmo nome dariam políticas concorrentes para o mesmo prompt.
+  const folded = foldAppName(appName);
+  const duplicated = appApprovalPolicies.some(
+    (policy) => policy.id !== CATCH_ALL_POLICY_ID && foldAppName(policy.name) === folded
+  );
+  if (duplicated) {
+    return null;
+  }
+
+  const policy = createApprovalPolicy(uniqueApprovalPolicyId(appName), appName);
+  appApprovalPolicies = orderApprovalPolicies([...appApprovalPolicies, policy]);
+  commitApprovalChange();
+  return policy;
+}
+
+function updateAppApprovalPolicy(id, patch) {
+  const index = appApprovalPolicies.findIndex((policy) => policy.id === id);
+  if (index === -1 || !patch || typeof patch !== 'object') {
+    return null;
+  }
+
+  const current = appApprovalPolicies[index];
+  const next = { ...current };
+
+  if (patch.enabled !== undefined) {
+    next.enabled = Boolean(patch.enabled);
+  }
+
+  if (patch.delayMs !== undefined) {
+    next.delayMs = normalizeApprovalDelayMs(patch.delayMs);
+  }
+
+  if (patch.scope !== undefined) {
+    if (!APPROVAL_SCOPES.has(patch.scope)) {
+      return null;
+    }
+    next.scope = patch.scope;
+  }
+
+  // O curinga não tem nome próprio: ele responde pelos apps que ninguém nomeou.
+  if (patch.name !== undefined && current.id !== CATCH_ALL_POLICY_ID) {
+    const name = normalizeAppName(patch.name);
+    if (!name) {
+      return null;
+    }
+    next.name = name;
+  }
+
+  appApprovalPolicies[index] = next;
+  commitApprovalChange();
+  return next;
+}
+
+function removeAppApprovalPolicy(id) {
+  if (id === CATCH_ALL_POLICY_ID) {
     return false;
   }
 
-  quimeraApprovalScope = scope;
-  scheduleSessionSave();
-  syncQuimeraAutoApproveConfig();
-  emitState();
+  const index = appApprovalPolicies.findIndex((policy) => policy.id === id);
+  if (index === -1) {
+    return false;
+  }
+
+  appApprovalPolicies.splice(index, 1);
+  commitApprovalChange();
   return true;
 }
 
-function injectChatgptReasoningControl() {
+function injectAppReasoningControl() {
   const view = providerViews.get('chatgpt');
   if (!view || view.webContents.isDestroyed()) {
     return;
   }
 
-  view.webContents.executeJavaScript(CHATGPT_REASONING_SCRIPT)
-    .then(() => syncChatgptReasoningConfig())
+  view.webContents.executeJavaScript(APP_REASONING_SCRIPT)
+    .then(() => syncAppReasoningConfig())
     .catch(() => {
       // Navigation can briefly make the renderer unavailable; dom-ready retries it.
     });
 }
 
-function syncChatgptReasoningConfig() {
+function syncAppReasoningConfig() {
   const view = providerViews.get('chatgpt');
   if (!view || view.webContents.isDestroyed()) {
     return;
   }
 
-  const level = JSON.stringify(chatgptReasoningLevel);
+  const level = JSON.stringify(appReasoningLevel);
   view.webContents.executeJavaScript(
-    `window.__chatClientReasoningControl?.setLevel(${level})`
+    `window.__chatClientAppReasoning?.setLevel(${level})`
   ).then((applied) => {
     if (applied === false) {
-      console.warn(`[chatgpt-reasoning] não foi possível aplicar o nível ${chatgptReasoningLevel} no seletor nativo`);
+      console.warn(`[app-reasoning] não foi possível aplicar o nível ${appReasoningLevel} no seletor nativo`);
     }
   }).catch(() => {});
 }
 
-function setChatgptReasoningLevel(level) {
-  if (!CHATGPT_REASONING_LEVELS.has(level)) {
+function setAppReasoningLevel(level) {
+  if (!APP_REASONING_LEVELS.has(level)) {
     return false;
   }
 
-  chatgptReasoningLevel = level;
+  appReasoningLevel = level;
   scheduleSessionSave();
-  syncChatgptReasoningConfig();
+  syncAppReasoningConfig();
   emitState();
   return true;
 }
@@ -1108,28 +1292,37 @@ function registerIpc() {
     refreshCurrentMode();
   });
 
-  ipcMain.handle('chatclient:set-quimera-auto-approve', (_event, enabled) => {
-    setQuimeraAutoApprove(enabled);
-    return { enabled: quimeraAutoApproveEnabled };
+  ipcMain.handle('chatclient:set-app-approvals-enabled', (_event, enabled) => {
+    setAppApprovalsEnabled(enabled);
+    return getApprovalsState();
   });
 
-  ipcMain.handle('chatclient:set-quimera-approval-delay', (_event, delayMs) => {
-    setQuimeraApprovalDelayMs(delayMs);
-    return { delayMs: quimeraApprovalDelayMs };
-  });
-
-  ipcMain.handle('chatclient:set-quimera-approval-scope', (_event, scope) => {
-    if (!setQuimeraApprovalScope(scope)) {
-      throw new Error(`Unsupported Quimera approval scope: ${String(scope)}`);
+  ipcMain.handle('chatclient:add-app-approval-policy', (_event, name) => {
+    if (!addAppApprovalPolicy(name)) {
+      throw new Error(`Cannot add approval policy: ${String(name)}`);
     }
-    return { scope: quimeraApprovalScope };
+    return getApprovalsState();
   });
 
-  ipcMain.handle('chatclient:set-chatgpt-reasoning-level', (_event, level) => {
-    if (!setChatgptReasoningLevel(level)) {
-      throw new Error(`Unsupported ChatGPT reasoning level: ${String(level)}`);
+  ipcMain.handle('chatclient:update-app-approval-policy', (_event, id, patch) => {
+    if (!updateAppApprovalPolicy(id, patch)) {
+      throw new Error(`Cannot update approval policy: ${String(id)}`);
     }
-    return { level: chatgptReasoningLevel };
+    return getApprovalsState();
+  });
+
+  ipcMain.handle('chatclient:remove-app-approval-policy', (_event, id) => {
+    if (!removeAppApprovalPolicy(id)) {
+      throw new Error(`Cannot remove approval policy: ${String(id)}`);
+    }
+    return getApprovalsState();
+  });
+
+  ipcMain.handle('chatclient:set-app-reasoning-level', (_event, level) => {
+    if (!setAppReasoningLevel(level)) {
+      throw new Error(`Unsupported app reasoning level: ${String(level)}`);
+    }
+    return { level: appReasoningLevel };
   });
 
   ipcMain.handle('chatclient:set-restore-workspace', (_event, enabled) => {

@@ -249,7 +249,7 @@ html[data-rail-visible="true"] .toolbar {
   font-weight: 650;
 }
 
-.quimera-icon {
+.approvals-icon {
   width: 16px;
   height: 16px;
   flex-shrink: 0;
@@ -411,6 +411,9 @@ html[data-browser-preview="true"][data-mode="compare"] .browser-preview {
 
 .settings-card {
   width: min(440px, calc(100vw - 96px));
+  /* A lista de políticas cresce com o número de apps: o card rola sozinho. */
+  max-height: calc(100vh - 86px);
+  overflow-y: auto;
   padding: 22px;
   border-radius: 16px;
   background: var(--panel-bg);
@@ -511,6 +514,119 @@ html[data-browser-preview="true"][data-mode="compare"] .browser-preview {
 
 .setting-select:focus {
   border-color: var(--accent);
+}
+
+.setting-input {
+  flex: 1;
+  min-width: 0;
+  height: 34px;
+  padding: 0 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  outline: none;
+  background: var(--panel-elevated);
+  color: var(--text);
+  font: inherit;
+}
+
+.setting-input:focus {
+  border-color: var(--accent);
+}
+
+.setting-input::placeholder {
+  color: var(--muted);
+}
+
+.policy-section {
+  padding-bottom: 16px;
+  border-bottom: 1px solid var(--border);
+  transition: opacity 120ms ease;
+}
+
+.policy-section.inactive {
+  opacity: 0.5;
+}
+
+.policy-list {
+  display: grid;
+  gap: 8px;
+  margin: 14px 0;
+}
+
+.policy-item {
+  padding: 12px;
+  border-radius: 10px;
+  background: var(--panel-elevated);
+  border: 1px solid var(--border);
+}
+
+.policy-item.off .policy-controls {
+  opacity: 0.45;
+}
+
+.policy-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.policy-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.policy-remove {
+  flex: 0 0 auto;
+  width: 26px;
+  height: 26px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 17px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.policy-remove:hover {
+  background: rgba(255, 123, 114, 0.14);
+  color: var(--danger);
+}
+
+.policy-hint {
+  margin: 8px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.policy-controls {
+  display: grid;
+  gap: 10px;
+  margin-top: 12px;
+  transition: opacity 120ms ease;
+}
+
+.policy-field {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.policy-field .setting-select {
+  flex: 0 0 148px;
+}
+
+.policy-add {
+  display: flex;
+  gap: 8px;
 }
 
 .switch {

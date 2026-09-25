@@ -1,11 +1,19 @@
 (() => {
   const API_KEY = '__chatClientAppApprovals';
   const LEGACY_API_KEY = '__chatClientQuimeraAutoApprove';
-  const VERSION = 1;
+  const VERSION = 2;
   // Política curinga: vale para todo app que não tem política própria.
   const CATCH_ALL_POLICY_ID = '*';
   const ALLOW_LABELS = new Set(['permitir', 'allow']);
-  const PROMPT_PHRASES = ['permitir que', 'allow '];
+  const CANCEL_LABELS = new Set(['cancelar', 'cancel']);
+  const PROMPT_PHRASES = [
+    'permitir que',
+    'allow ',
+    ' quer ',
+    ' wants ',
+    ' gostaria ',
+    ' would like '
+  ];
   const MAX_CONTAINER_TEXT_LENGTH = 6000;
   const MAX_ANCESTOR_DEPTH = 14;
   const MAX_PROMPT_EXPANSION_DEPTH = 4;
@@ -118,6 +126,30 @@
     );
   }
 
+  function hasActionButton(container, labels, except = null) {
+    for (const button of container.querySelectorAll(BUTTON_SELECTOR)) {
+      if (button !== except && labels.has(elementText(button))) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  function isPermissionContainer(container, allowButton, text) {
+    if (text.length > MAX_CONTAINER_TEXT_LENGTH) {
+      return false;
+    }
+
+    // O layout atual do ChatGPT usa um modal com ações Cancelar / Permitir e
+    // texto como “<app> quer ...”, sem a frase antiga “Permitir que ...”.
+    // A dupla de ações evita tratar qualquer botão “Permitir” da página como
+    // prompt de permissão.
+    return (
+      isApprovalPrompt(text) ||
+      hasActionButton(container, CANCEL_LABELS, allowButton)
+    );
+  }
+
   function containsSingleAllowButton(container) {
     let found = 0;
 
@@ -145,7 +177,7 @@
 
       const text = elementText(container);
 
-      if (isApprovalPrompt(text)) {
+      if (isPermissionContainer(container, allowButton, text)) {
         if (promptDepth === -1) {
           promptDepth = depth;
         }

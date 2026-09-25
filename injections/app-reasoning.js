@@ -1,6 +1,6 @@
 (() => {
   const API_KEY = '__chatClientAppReasoning';
-  const API_VERSION = 6;
+  const API_VERSION = 7;
   // Posições do slider nativo de "Potência" do ChatGPT.
   // 0 troca para o modelo instantâneo (sem raciocínio); 1-3 são esforços do thinking.
   const LEVEL_POSITIONS = {
@@ -23,6 +23,12 @@
 
   const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+  function debugLog(message) {
+    if (window.__chatClientDebug === true) {
+      console.info('[chatclient:reasoning]', message);
+    }
+  }
+
   async function waitFor(getter, timeoutMs, stepMs) {
     const deadline = Date.now() + timeoutMs;
     for (;;) {
@@ -37,8 +43,22 @@
     }
   }
 
-  function firePointer(el, type) {
-    el.dispatchEvent(new PointerEvent(type, { bubbles: true, cancelable: true, pointerId: 1 }));
+  function isVisible(el) {
+    return Boolean(el && (el.offsetWidth || el.offsetHeight || el.getClientRects().length));
+  }
+
+  function firePointer(el, type, buttons) {
+    const EventClass = window.PointerEvent || window.MouseEvent;
+    el.dispatchEvent(new EventClass(type, {
+      bubbles: true,
+      cancelable: true,
+      composed: true,
+      button: 0,
+      buttons,
+      pointerId: 1,
+      pointerType: 'mouse',
+      isPrimary: true
+    }));
   }
 
   function fireKey(el, key) {
@@ -47,6 +67,19 @@
   }
 
   function findPill() {
+    const buttons = [...document.querySelectorAll('button[aria-haspopup="menu"]')].filter(isVisible);
+    const semantic = buttons.find((button) => {
+      const label = button.getAttribute('aria-label') || '';
+      const text = button.textContent || '';
+      return (
+        /selecionar modelo do chatgpt|select chatgpt model/i.test(label) ||
+        /esforço de raciocínio|reasoning effort/i.test(text)
+      );
+    });
+    if (semantic) {
+      return semantic;
+    }
+
     const form = document.querySelector('form[data-type="unified-composer"]');
     if (!form) {
       return null;
@@ -56,8 +89,26 @@
       null;
   }
 
-  function findSlider() {
-    return document.querySelector('[data-model-reasoning-effort-slider] [role="slider"]');
+  function findSlider(pill = null) {
+    const menuId = pill?.getAttribute('aria-controls');
+    const owned = menuId
+      ? document.getElementById(menuId)?.querySelector('[role="slider"][aria-valuenow]')
+      : null;
+    if (owned && isVisible(owned)) {
+      return owned;
+    }
+
+    return [...document.querySelectorAll('[role="slider"][aria-valuenow]')]
+      .filter(isVisible)
+      .at(-1) || null;
+  }
+
+  function effortSurfaceOpen(pill) {
+    return (
+      pill?.getAttribute('aria-expanded') === 'true' ||
+      pill?.getAttribute('data-state') === 'open' ||
+      Boolean(findSlider(pill))
+    );
   }
 
   function hidePopperWhileAutomating() {
@@ -67,7 +118,8 @@
     const style = document.createElement('style');
     style.id = HIDE_STYLE_ID;
     style.textContent =
-      '[data-radix-popper-content-wrapper]:has([data-model-reasoning-effort-slider]) { visibility: hidden !important; }';
+      '[data-radix-popper-content-wrapper]:has([role="slider"][aria-valuenow]) {' +
+      ' visibility: hidden !important; }';
     document.head.appendChild(style);
   }
 
@@ -83,43 +135,61 @@
       return false;
     }
 
-    const menuWasOpen = Boolean(findSlider());
+    const menuWasOpen = effortSurfaceOpen(pill);
     try {
       if (!menuWasOpen) {
         hidePopperWhileAutomating();
-        firePointer(pill, 'pointerdown');
-        firePointer(pill, 'pointerup');
         pill.click();
+        let opened = await waitFor(() => effortSurfaceOpen(pill), 1500, 50);
+        if (!opened) {
+          firePointer(pill, 'pointerdown', 1);
+          opened = await waitFor(() => effortSurfaceOpen(pill), 1500, 50);
+        }
+        if (!opened) {
+          return false;
+        }
       }
 
-      const slider = await waitFor(findSlider, 3000, 100);
+      const slider = await waitFor(() => findSlider(pill), 3000, 100);
       if (!slider || token !== state.token) {
         return false;
       }
 
-      slider.focus();
       let current = Number(slider.getAttribute('aria-valuenow'));
       if (!Number.isFinite(current)) {
-        // Leitura falhou: Home leva à posição 0 e o alvo vira um deslocamento absoluto.
-        fireKey(slider, 'Home');
-        await sleep(150);
-        current = 0;
+        return false;
+      }
+      const initial = current;
+
+      const control = slider.closest('[role="menuitem"]') || slider;
+      for (let attempts = 0; attempts < 5 && current !== target; attempts += 1) {
+        control.focus();
+        fireKey(control, target > current ? 'ArrowRight' : 'ArrowLeft');
+
+        const previous = current;
+        const changed = await waitFor(() => {
+          const next = Number(findSlider(pill)?.getAttribute('aria-valuenow'));
+          return Number.isFinite(next) && next !== previous ? next : null;
+        }, 1000, 40);
+
+        if (changed === null) {
+          return false;
+        }
+        current = changed;
       }
 
-      const key = target > current ? 'ArrowRight' : 'ArrowLeft';
-      for (let i = 0; i < Math.abs(target - current); i++) {
-        fireKey(slider, key);
-        await sleep(120);
+      const applied = current === target;
+      if (applied) {
+        debugLog(`aplicado ${initial} -> ${current} (${level})`);
       }
-
-      const applied = Number(slider.getAttribute('aria-valuenow')) === target;
 
       if (!menuWasOpen) {
-        fireKey(slider, 'Escape');
-        const closed = await waitFor(() => !findSlider(), 2000, 100);
+        fireKey(pill, 'Escape');
+        const closed = await waitFor(() => !effortSurfaceOpen(pill), 2000, 100);
         if (!closed) {
-          firePointer(document.body, 'pointerdown');
-          await waitFor(() => !findSlider(), 1000, 100);
+          firePointer(document.body, 'pointerdown', 1);
+          firePointer(document.body, 'pointerup', 0);
+          await waitFor(() => !effortSurfaceOpen(pill), 1000, 100);
         }
       }
 

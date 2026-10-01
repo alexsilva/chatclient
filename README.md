@@ -28,7 +28,7 @@ Em **Configurações**, cada app tem sua própria política:
 - **Nome do app** — como ele aparece no texto do pedido. A comparação ignora acentos e caixa.
 - **Ativa** — sem isso, os pedidos daquele app ficam esperando por você.
 - **Atraso** — tempo entre detectar o pedido e responder, de 0 a 30 s.
-- **Escopo** — `Somente esta chamada` clica em *Permitir*; `Toda a conversa` abre o menu ao lado do botão e escolhe a opção de conversa, quando o ChatGPT a oferece.
+- **Escopo** — `Somente esta chamada` clica em *Permitir uma vez* (*Permitir*, no layout antigo); `Toda a conversa` abre o menu ao lado do botão e escolhe a opção de conversa, quando o ChatGPT a oferece.
 
 A política **Outros apps** é o curinga: vale para todo app sem política própria. Ela nasce desligada, porque aprovar apps que ninguém nomeou é o escopo mais amplo possível.
 

@@ -253,6 +253,10 @@ function thoughtStream({ message, conversation, turn }) {
     message: { id, author: { role: 'assistant' }, content: { content_type: 'thoughts', thoughts }, metadata: { turn_exchange_id: turnId } },
     conversation_id: conversation
   });
+  const answer = (id, text, channel) => ({
+    message: { id, author: { role: 'assistant' }, channel, content: { content_type: 'text', parts: [text] }, metadata: { turn_exchange_id: turn } },
+    conversation_id: conversation
+  });
   const delta = (data) => `event: delta\ndata: ${JSON.stringify(data)}\n\n`;
   const body = [
     'event: delta_encoding\ndata: "v1"\n\n',
@@ -266,6 +270,10 @@ function thoughtStream({ message, conversation, turn }) {
     delta({ p: '', o: 'add', v: thought('t2', [{ summary: 'Conferindo a resposta', content: '' }]), c: 2 }),
     delta({ o: 'patch', v: [{ p: '/message/content/thoughts/0/content', o: 'append', v: 'Tudo certo.' },
       { p: '/message/status', o: 'replace', v: 'finished_successfully' }] }),
+    delta({ p: '', o: 'add', v: answer('commentary', 'Atualização intermediária que não deve entrar em content.', 'commentary'), c: 3 }),
+    delta({ p: '', o: 'add', v: answer('answer', 'Resposta ', 'final'), c: 4 }),
+    delta({ p: '/message/content/parts/0', o: 'append', v: 'final: ' + message }),
+    delta({ p: '/message/status', o: 'replace', v: 'finished_successfully' }),
     ': ping\n\n',
     'data: [DONE]\n\n'
   ].join('');
@@ -532,7 +540,20 @@ app.whenReady().then(async () => {
     '\n\n**Conferindo a resposta**\n\nTudo certo.';
   await page('window.streamThoughts = true; window.responseDelay = 900;');
   response = await request('Thinking pelo stream', { stream: true });
-  const streamText = await response.text();
+  const liveReader = response.body.getReader();
+  const liveDecoder = new TextDecoder();
+  let streamText = '';
+  while (!streamText.includes('Resposta ')) {
+    const { value, done } = await liveReader.read();
+    assert.equal(done, false);
+    streamText += liveDecoder.decode(value, { stream: true });
+  }
+  assert.equal(await page('document.querySelector("form button[aria-label=Parar]") !== null'), true);
+  for (;;) {
+    const { value, done } = await liveReader.read();
+    if (done) { break; }
+    streamText += liveDecoder.decode(value, { stream: true });
+  }
   const streamEvents = streamText.split('\n\n').filter((line) => line.startsWith('data: '))
     .map((line) => line.slice(6)).filter((line) => line !== '[DONE]').map(JSON.parse);
   assert.equal(streamEvents.map((event) => event.choices[0].delta.reasoning_content || '').join(''), streamedThinking);

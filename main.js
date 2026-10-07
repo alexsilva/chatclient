@@ -1072,7 +1072,7 @@ function runInjection(contents, script) {
   );
 }
 
-async function relayActiveChat({ id, message, signal, onStart, onReasoningDelta }) {
+async function relayActiveChat({ id, message, signal, onStart, onActivity, onDelta, onReasoningDelta }) {
   // Nunca cria view, navega ou escolhe uma conversa: prende o pedido à view
   // que já estava ativa quando ele chegou.
   const providerId = activeProviderId;
@@ -1109,6 +1109,8 @@ async function relayActiveChat({ id, message, signal, onStart, onReasoningDelta 
     signal.throwIfAborted();
     onStart();
     let reasoning = '';
+    let streamedText = '';
+    let activitySeq = 0;
     for (;;) {
       signal.throwIfAborted();
       if (contents.isDestroyed()) {
@@ -1117,14 +1119,22 @@ async function relayActiveChat({ id, message, signal, onStart, onReasoningDelta 
       const result = await contents.executeJavaScript(`window.__chatClientAppServer.poll(${requestId})`);
       checkResult(result);
       signal.throwIfAborted();
+      if (Number.isInteger(result.activitySeq) && result.activitySeq > activitySeq) {
+        activitySeq = result.activitySeq;
+        onActivity();
+      }
       if (result.reasoning?.startsWith(reasoning) && result.reasoning.length > reasoning.length) {
         onReasoningDelta(result.reasoning.slice(reasoning.length));
         reasoning = result.reasoning;
       }
+      if (result.streamedText?.startsWith(streamedText) && result.streamedText.length > streamedText.length) {
+        onDelta(result.streamedText.slice(streamedText.length));
+        streamedText = result.streamedText;
+      }
       if (result.done) {
-        // Espera a UI concluir: o markdown pode substituir texto durante a
-        // geração. O cliente recebe exatamente o corpo final, também em SSE.
-        return { text: result.text, reasoning };
+        // A UI ainda fecha o ciclo e valida que a geração terminou, mas o SSE
+        // nativo pode já ter entregue a resposta final completa ao cliente.
+        return { text: result.text, reasoning, streamedComplete: Boolean(result.streamedComplete) };
       }
       await wait(150, undefined, { signal });
     }

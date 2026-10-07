@@ -1,7 +1,7 @@
 (() => {
   const API_KEY = '__chatClientAppServer';
   const TAP_KEY = '__chatClientAppServerTap';
-  const VERSION = 8;
+  const VERSION = 10;
   if (window[API_KEY]?.version === VERSION) {
     return;
   }
@@ -246,7 +246,7 @@
 
   async function readStream(request, reader) {
     const decoder = new TextDecoder();
-    const stream = { root: null, path: '', op: '', foreign: false };
+    const stream = { roots: new Map(), channel: 0, path: '', op: '', foreign: false };
     let buffer = '';
     while (pending === request && !stream.foreign) {
       const { done, value } = await reader.read();
@@ -285,25 +285,40 @@
       }
       request.streamed = true;
       request.turnExchangeId = event.input_message.metadata?.turn_exchange_id || request.turnExchangeId;
+      request.activitySeq++;
       return;
+    }
+    if (request.streamed) {
+      // Qualquer evento posterior do mesmo SSE é atividade real do provedor,
+      // inclusive tool calls e markers que não geram texto visível.
+      request.activitySeq++;
     }
     if (typeof event.type === 'string') {
       return;
     }
+    if (Number.isInteger(event.c)) {
+      stream.channel = event.c;
+    }
     if ('message' in event) {
-      stream.root = event;
+      stream.roots.set(stream.channel, event);
     } else {
-      // No delta encoding v1, campos omitidos repetem o caminho e a operação anteriores.
+      // No delta encoding v1, campos omitidos repetem o caminho, a operação e
+      // o canal anteriores. Canais distintos mantêm árvores independentes.
       stream.path = typeof event.p === 'string' ? event.p : stream.path;
       stream.op = typeof event.o === 'string' ? event.o : stream.op;
       applyDelta(stream, stream.path, stream.op, event.v);
     }
-    readThoughts(request, stream);
+    const root = stream.roots.get(stream.channel);
+    readThoughts(request, root);
+    readAnswer(request, root);
   }
 
   function applyDelta(stream, path, op, value) {
     if (op === 'patch') {
       for (const item of Array.isArray(value) ? value : []) {
+        if (Number.isInteger(item?.c)) {
+          stream.channel = item.c;
+        }
         applyDelta(stream, plain(item?.p), plain(item?.o), item?.v);
       }
       return;
@@ -311,11 +326,11 @@
     const keys = path.split('/').slice(1).map((key) => key.replace(/~1/g, '/').replace(/~0/g, '~'));
     if (!keys.length) {
       if (op === 'add' || op === 'replace') {
-        stream.root = value;
+        stream.roots.set(stream.channel, value);
       }
       return;
     }
-    let parent = stream.root;
+    let parent = stream.roots.get(stream.channel);
     for (const key of keys.slice(0, -1)) {
       parent = parent?.[key];
     }
@@ -335,14 +350,12 @@
     }
   }
 
-  function readThoughts(request, stream) {
-    const root = stream.root;
+  function readThoughts(request, root) {
     const message = root?.message;
     if (!message || typeof message !== 'object') {
       return;
     }
     if (root.conversation_id && root.conversation_id !== request.conversationId) {
-      stream.foreign = true;
       return;
     }
     const turn = message.metadata?.turn_exchange_id;
@@ -357,6 +370,50 @@
       const closing = !plain(thought?.content).trim() && thoughts.slice(0, index).some((item) => plain(item?.content).trim());
       recordThought(request, `${message.id}:${index}`, thought, closing);
     });
+  }
+
+  function readAnswer(request, root) {
+    const message = root?.message;
+    if (!message || typeof message !== 'object') {
+      return;
+    }
+    if (root.conversation_id && root.conversation_id !== request.conversationId) {
+      return;
+    }
+    const turn = message.metadata?.turn_exchange_id;
+    if (message.author?.role !== 'assistant' || (request.turnExchangeId && turn && turn !== request.turnExchangeId)) {
+      return;
+    }
+    const contentType = message.content?.content_type;
+    if (contentType !== 'text' && contentType !== 'multimodal_text') {
+      return;
+    }
+
+    // Modelos novos podem produzir mensagens visíveis em canais distintos.
+    // Só o canal final compõe content; commentary/thinking continuam separados.
+    const channel = message.channel || message.metadata?.channel;
+    if (channel && channel !== 'final') {
+      return;
+    }
+
+    const parts = message.content?.parts;
+    if (!Array.isArray(parts)) {
+      return;
+    }
+    const text = parts.map((part) => typeof part === 'string' ? part : plain(part?.text)).join('');
+    const key = message.id || 'final';
+    if (request.answerMessageId && request.answerMessageId !== key) {
+      return;
+    }
+    request.answerMessageId ||= key;
+    const previous = request.answerMessages.get(key) || '';
+    if (!text || text === previous || !text.startsWith(previous)) {
+      return;
+    }
+    request.answerMessages.set(key, text);
+    request.answer += text.slice(previous.length);
+    request.answerComplete ||= message.status === 'finished_successfully';
+    request.streamed = true;
   }
 
   function recordThought(request, key, thought, closing) {
@@ -676,7 +733,8 @@
       turns: new Set([...document.querySelectorAll(TURN_SELECTOR)].map(turnKey)),
       conversationId: location.pathname.match(/\/c\/([^/]+)\/?$/)?.[1],
       reasoning: '', reasoningBlocks: new Map(), reasoningNodes: new Map(), openedThinking: new Set(), thinkingOpenedAt: 0,
-      streamed: false, turnExchangeId: null, thoughts: new Map(), openThought: null, readers: new Set(),
+      answer: '', answerComplete: false, answerMessageId: null, answerMessages: new Map(),
+      streamed: false, activitySeq: 0, turnExchangeId: null, thoughts: new Map(), openThought: null, readers: new Set(),
       sendMode: sender ? 'direct' : 'editor',
       submitted: false, sawBusy: false, lastText: '', changedAt: Date.now()
     };
@@ -747,7 +805,11 @@
       return fail('chat_changed', 'Outra mensagem foi enviada no chat durante o pedido.');
     }
     // O DOM só é lido quando o stream do ChatGPT não foi ligado ao pedido.
+    const previousReasoning = request.reasoning;
     const thinkingOpening = !request.streamed && captureReasoning(request, latestUser);
+    if (request.reasoning !== previousReasoning) {
+      request.activitySeq++;
+    }
     const replies = messages('assistant', request.providerId).filter((element) =>
       !request.assistants.has(messageKey(element)) &&
       (latestUser.compareDocumentPosition(element) & Node.DOCUMENT_POSITION_FOLLOWING));
@@ -760,6 +822,7 @@
     if (text !== request.lastText) {
       request.lastText = text;
       request.changedAt = Date.now();
+      request.activitySeq++;
     }
     const error = [...document.querySelectorAll('[role="alert"], [data-testid="conversation-error"]')]
       .find((element) => visible(element) && /something went wrong|error|erro|falha|try again|tente novamente/i.test(textOf(element)));
@@ -768,7 +831,15 @@
     }
     const done = Boolean(text && !busy && !thinkingOpening && (turnComplete(reply) ||
       (request.sawBusy && Date.now() - request.changedAt >= 1500)));
-    return { text, reasoning: request.reasoning, done, sendMode: request.sendMode };
+    return {
+      text,
+      reasoning: request.reasoning,
+      streamedText: request.answer,
+      streamedComplete: request.answerComplete,
+      activitySeq: request.activitySeq,
+      done,
+      sendMode: request.sendMode
+    };
   }
 
   window[API_KEY] = {

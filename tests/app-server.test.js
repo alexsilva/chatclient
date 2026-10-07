@@ -88,6 +88,20 @@ test('stream SSE mantém o texto, termina com stop e [DONE]', async (t) => {
   assert.equal(chunks.at(-1).choices[0].finish_reason, 'stop');
 });
 
+test('SSE concluído pelo provedor não falha se a UI reserializar o mesmo markdown', async (t) => {
+  const { request } = await setup(t, async ({ onStart, onDelta }) => {
+    onStart();
+    onDelta('linha 1\nlinha 2');
+    return { text: 'linha 1  \nlinha 2', streamedComplete: true };
+  });
+  const response = await request({ ...prompt(), stream: true });
+  const events = (await response.text()).split('\n\n').filter((line) => line.startsWith('data: ')).map((line) => line.slice(6));
+  assert.equal(events.pop(), '[DONE]');
+  const chunks = events.map(JSON.parse);
+  assert.equal(chunks.map((chunk) => chunk.choices?.[0]?.delta?.content || '').join(''), 'linha 1\nlinha 2');
+  assert.equal(chunks.at(-1).choices[0].finish_reason, 'stop');
+});
+
 test('JSON devolve thinking separado do markdown da resposta, sem duplicar deltas', async (t) => {
   const { request } = await setup(t, async ({ onReasoningDelta }) => {
     onReasoningDelta('Conferindo ');
@@ -202,7 +216,22 @@ test('serializa o chat recusando um segundo pedido enquanto a resposta está pen
   assert.equal(server.getState().busy, false);
 });
 
-test('timeout cancela a ponte mesmo se a UI não resolver sua promessa', async (t) => {
+test('atividade real renova o timeout sem impor limite total à execução', async (t) => {
+  const { request } = await setup(t, async ({ onStart, onActivity }) => {
+    onStart();
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    onActivity();
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    onActivity();
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    return 'Resposta após execução longa';
+  }, { timeoutMs: 70 });
+  const response = await request(prompt());
+  assert.equal(response.status, 200);
+  assert.equal((await response.json()).choices[0].message.content, 'Resposta após execução longa');
+});
+
+test('timeout cancela a ponte após período contínuo sem atividade', async (t) => {
   let signal;
   const { request, server } = await setup(t, async (args) => { signal = args.signal; return new Promise(() => {}); }, { timeoutMs: 50 });
   const response = await request(prompt());

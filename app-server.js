@@ -267,9 +267,15 @@ class AppServer {
       }
     };
     response.on('close', disconnected);
-    const timeout = setTimeout(() => controller.abort(
-      new AppServerError('Tempo esgotado aguardando a resposta do chat.', 504, 'chat_timeout')
-    ), this.timeoutMs);
+    let timeout = null;
+    const refreshTimeout = () => {
+      clearTimeout(timeout);
+      timeout = setTimeout(() => controller.abort(
+        new AppServerError('Tempo esgotado aguardando a resposta do chat.', 504, 'chat_timeout')
+      ), this.timeoutMs);
+    };
+    // timeoutMs representa inatividade, não duração total da execução.
+    refreshTimeout();
     let aborted;
     const abortPromise = new Promise((_resolve, reject) => {
       aborted = () => reject(controller.signal.reason);
@@ -278,8 +284,14 @@ class AppServer {
     try {
       const result = await Promise.race([
         this.relay({
-          id, message, signal: controller.signal, onStart: startStream,
+          id, message, signal: controller.signal,
+          onStart: () => {
+            refreshTimeout();
+            startStream();
+          },
+          onActivity: refreshTimeout,
           onDelta: (delta) => {
+            refreshTimeout();
             if (body.stream && !controller.signal.aborted && !response.destroyed) {
               startStream();
               streamed += delta;
@@ -287,6 +299,7 @@ class AppServer {
             }
           },
           onReasoningDelta: (delta) => {
+            refreshTimeout();
             if (!controller.signal.aborted && !response.destroyed && typeof delta === 'string' && delta) {
               reasoning += delta;
               if (body.stream) {
@@ -318,11 +331,19 @@ class AppServer {
       }
       if (body.stream) {
         startStream();
-        if (!text.startsWith(streamed)) {
-          throw new AppServerError('A resposta mudou durante o envio.', 502, 'response_changed');
-        }
-        if (text.length > streamed.length) {
-          chunk({ content: text.slice(streamed.length) });
+        if (result?.streamedComplete && streamed) {
+          // O SSE nativo é a fonte canônica enquanto a geração acontece. A UI
+          // pode reserializar o mesmo markdown de outra forma ao renderizar
+          // (por exemplo, <br> vira dois espaços antes de \n), então não exige
+          // igualdade textual depois que o próprio provedor marcou o stream
+          // final como concluído.
+        } else {
+          if (!text.startsWith(streamed)) {
+            throw new AppServerError('A resposta mudou durante o envio.', 502, 'response_changed');
+          }
+          if (text.length > streamed.length) {
+            chunk({ content: text.slice(streamed.length) });
+          }
         }
         chunk({}, 'stop');
         response.end('data: [DONE]\n\n');

@@ -537,6 +537,62 @@ html[data-browser-preview="true"][data-mode="compare"] .browser-preview {
   color: var(--muted);
 }
 
+.server-section {
+  padding-bottom: 16px;
+}
+
+.server-fields {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 94px;
+  gap: 12px;
+  margin: 14px 0;
+}
+
+.server-fields label {
+  display: grid;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.server-fields input {
+  width: 100%;
+}
+
+.server-key-field {
+  grid-column: 1 / -1;
+}
+
+.server-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.server-actions span,
+.server-status,
+.server-url {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.server-status {
+  margin: 12px 0 0;
+}
+
+.server-status.error {
+  color: var(--danger);
+}
+
+.server-url {
+  margin: 6px 0 0;
+  overflow-wrap: anywhere;
+  user-select: text;
+  font-family: ui-monospace, monospace;
+}
+
 .policy-section {
   padding-bottom: 16px;
   border-bottom: 1px solid var(--border);

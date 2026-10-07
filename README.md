@@ -34,6 +34,33 @@ A política **Outros apps** é o curinga: vale para todo app sem política próp
 
 Quando há políticas concorrentes, a mais específica vence: um app com política própria desligada continua esperando por você mesmo com o curinga ligado.
 
+## Servidor OpenAI para o chat ativo
+
+Em **Configurações → Servidor OpenAI · Chat ativo**, defina **host**, **porta** e **chave (key)** e ative o interruptor. O padrão é `127.0.0.1:8787`, inicialmente desligado. A configuração é salva independentemente da opção de restaurar o workspace; o servidor acompanha o ciclo de vida do aplicativo.
+
+Configure seu cliente com:
+
+- **Base URL:** `http://127.0.0.1:8787/v1` (ou o host e a porta escolhidos).
+- **API key:** a chave definida no modal, enviada como `Authorization: Bearer <key>`.
+- **Modelo:** `active-chat`, um alias para o chat aberto. O modelo real continua sendo escolhido na interface do provedor.
+
+A ponte oferece `GET /v1/models` e `POST /v1/chat/completions`, com o formato de [Chat Completions](https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create). Ela envia **somente o texto da última mensagem `user`** ao campo da conversa atual e devolve o corpo da resposta exibida. Histórico recebido, mensagens `system`/`developer` e parâmetros de geração não são enviados ao chat. Nenhuma conversa é criada, selecionada ou mantida pelo servidor.
+
+ChatGPT e Grok usam a view já aberta. No modo **Comparar**, o alvo é o último chat que recebeu foco; cada pedido permanece ligado àquela conversa até terminar. A mensagem enviada e a resposta ficam na UI do provedor e são retornadas ao cliente.
+
+`stream: true` retorna SSE: o conteúdo é entregue quando a UI conclui a resposta, seguido de `finish_reason: stop` e `[DONE]`. Isso evita devolver versões intermediárias alteradas pela renderização do markdown. Não há estimativa de consumo de tokens. A ponte aceita texto; anexos e chamadas de ferramentas não são convertidos em respostas da API.
+
+Abra uma conversa existente antes de usar o servidor. Se houver um rascunho, uma geração em andamento ou outro pedido pendente, a ponte retorna um erro sem sobrescrever o campo. Trocar de conversa durante o pedido também retorna erro. Desconectar o cliente cancela a espera, e a geração já iniciada permanece na UI.
+
+Exemplo:
+
+```bash
+curl http://127.0.0.1:8787/v1/chat/completions \
+  -H 'Authorization: Bearer SUA_CHAVE' \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"active-chat","messages":[{"role":"user","content":"Olá"}]}'
+```
+
 ## Desenvolvimento
 
 ### Pré-requisitos
@@ -75,6 +102,10 @@ Abra `http://127.0.0.1:4173`.
 
 No modo de prévia, placeholders representam os `WebContentsView` de ChatGPT e Grok. Isso permite validar layout, responsividade e interações do shell diretamente no browser.
 
+### Testes da ponte
+
+`npm test` valida o servidor HTTP, autenticação, última mensagem, SSE e falhas. `npm run test:ui` testa o modal e as injeções no Electron com páginas simuladas e um perfil temporário, sem acessar conversas reais. Em Linux sem display, use `xvfb-run -a -s '-screen 0 1280x1024x24 -extension GLX' npm run test:ui`. Os seletores das páginas dependem da UI de cada provedor.
+
 ## Build Linux
 
 ```bash
@@ -100,7 +131,7 @@ BrowserWindow
     └── https://grok.com/
 ```
 
-`main.js` controla ciclo de vida, navegação e layout dos provedores. `preload.js` expõe apenas a ponte IPC necessária ao shell. Scripts específicos de páginas ficam em `injections/`.
+`main.js` controla ciclo de vida, navegação e layout dos provedores. `app-server.js` oferece o servidor HTTP e chama a ponte da view ativa; `injections/app-server.js` envia pelo campo da página e observa a resposta. `preload.js` expõe apenas a ponte IPC necessária ao shell. Scripts específicos de páginas ficam em `injections/`.
 
 ## Release
 

@@ -10,6 +10,8 @@ const {
   mkdirSync
 } = require('node:fs');
 const { join } = require('node:path');
+const { setTimeout: wait } = require('node:timers/promises');
+const { AppServer, AppServerError, DEFAULT_SERVER_CONFIG, normalizeServerConfig } = require('./app-server');
 
 // Modo debug: ativo apenas quando o ChatClient roda a partir do código-fonte.
 // Instalado (deb/AppImage) `app.isPackaged` é true, o modo fica desligado e o
@@ -122,11 +124,13 @@ const APP_REASONING_SCRIPT = readFileSync(
   join(__dirname, 'injections', 'app-reasoning.js'),
   'utf8'
 );
+const APP_SERVER_SCRIPT = readFileSync(join(__dirname, 'injections', 'app-server.js'), 'utf8');
 
 let mainWindow = null;
 let providerViews = new Map();
 let chromeViews = new Map();
 let mode = 'chatgpt';
+let activeProviderId = 'chatgpt';
 let layout = { ...DEFAULT_LAYOUT };
 let appApprovalsEnabled = true;
 let appApprovalPolicies = defaultApprovalPolicies();
@@ -142,6 +146,8 @@ let sessionSaveTimer = null;
 let restoredWindowState = null;
 let restoreWorkspaceEnabled = true;
 let appReasoningLevel = DEFAULT_APP_REASONING_LEVEL;
+let restoredServerConfig = { ...DEFAULT_SERVER_CONFIG };
+const appServer = new AppServer({ relay: relayActiveChat, onState: () => emitState() });
 let providerUrls = Object.fromEntries(
   Object.values(PROVIDERS).map((provider) => [provider.id, provider.url])
 );
@@ -178,6 +184,14 @@ function loadSessionState() {
       appReasoningLevel = savedReasoningLevel;
     }
 
+    if (saved.appServer && typeof saved.appServer === 'object') {
+      try {
+        restoredServerConfig = normalizeServerConfig({ ...DEFAULT_SERVER_CONFIG, ...saved.appServer });
+      } catch (error) {
+        log.warn('Configuração do servidor inválida:', error.message);
+      }
+    }
+
     // Geometria da janela é estado da aplicação, não do workspace.
     // Mesmo com a restauração do workspace desativada, o cliente deve abrir
     // exatamente onde o usuário o deixou em vez de voltar ao posicionamento
@@ -192,6 +206,7 @@ function loadSessionState() {
 
     if (MODES.has(saved.mode)) {
       mode = saved.mode;
+      activeProviderId = mode === 'grok' ? 'grok' : 'chatgpt';
     }
 
     if (Number.isFinite(saved.splitRatio)) {
@@ -237,6 +252,7 @@ function buildSessionState() {
       policies: appApprovalPolicies.map((policy) => ({ ...policy }))
     },
     appReasoningLevel,
+    appServer: Object.fromEntries(Object.keys(DEFAULT_SERVER_CONFIG).map((key) => [key, appServer.config[key]])),
     providers: { ...providerUrls },
     window: getPersistedWindowState()
   };
@@ -438,7 +454,8 @@ function buildRendererState() {
     mode,
     ...getApprovalsState(),
     appReasoningLevel,
-    restoreWorkspaceEnabled
+    restoreWorkspaceEnabled,
+    appServer: { ...appServer.getState(), targetProvider: activeProviderId }
   };
 }
 
@@ -884,6 +901,18 @@ function configureProviderView(provider) {
 
   forwardViewConsole(contents, provider.id);
 
+  contents.on('focus', () => {
+    if (mode === provider.id || mode === 'compare') {
+      activeProviderId = provider.id;
+      emitState();
+    }
+  });
+  contents.on('dom-ready', () => {
+    if (isTrustedProviderUrl(provider.id, contents.getURL())) {
+      runInjection(contents, APP_SERVER_SCRIPT).catch(() => {});
+    }
+  });
+
   contents.setWindowOpenHandler(({ url }) => {
     if (isManagedPopupNavigationUrl(url)) {
       return {
@@ -1038,6 +1067,59 @@ function runInjection(contents, script) {
   return contents.executeJavaScript(
     `window.__chatClientDebug = ${JSON.stringify(debugMode)};\n${script}`
   );
+}
+
+async function relayActiveChat({ id, message, signal, onStart }) {
+  // Nunca cria view, navega ou escolhe uma conversa: prende o pedido à view
+  // que já estava ativa quando ele chegou.
+  const providerId = activeProviderId;
+  const contents = providerViews.get(providerId)?.webContents;
+  if (!contents || contents.isDestroyed() || !isTrustedProviderUrl(providerId, contents.getURL())) {
+    throw new AppServerError('Abra uma conversa no provedor ativo.', 409, 'no_active_chat');
+  }
+  const requestId = JSON.stringify(id);
+  const cancel = () => {
+    if (!contents.isDestroyed()) {
+      contents.executeJavaScript(`window.__chatClientAppServer?.cancel(${requestId})`).catch(() => {});
+    }
+  };
+  const checkResult = (result) => {
+    if (!result || result.error) {
+      const code = result?.error?.code || 'bridge_unavailable';
+      const status = code === 'provider_error' ? 502 :
+        ['composer_unavailable', 'send_unavailable', 'bridge_unavailable'].includes(code) ? 503 : 409;
+      throw new AppServerError(result?.error?.message || 'A ponte do chat não está disponível.', status, code);
+    }
+  };
+  signal.addEventListener('abort', cancel, { once: true });
+  try {
+    signal.throwIfAborted();
+    await runInjection(contents, APP_SERVER_SCRIPT);
+    signal.throwIfAborted();
+    const started = await contents.executeJavaScript(
+      `window.__chatClientAppServer.begin(${JSON.stringify({ id, providerId, message })})`, true
+    );
+    checkResult(started);
+    signal.throwIfAborted();
+    onStart();
+    for (;;) {
+      signal.throwIfAborted();
+      if (contents.isDestroyed()) {
+        throw new AppServerError('O chat foi fechado.', 409, 'chat_closed');
+      }
+      const result = await contents.executeJavaScript(`window.__chatClientAppServer.poll(${requestId})`);
+      checkResult(result);
+      if (result.done) {
+        // Espera a UI concluir: o markdown pode substituir texto durante a
+        // geração. O cliente recebe exatamente o corpo final, também em SSE.
+        return result.text;
+      }
+      await wait(250, undefined, { signal });
+    }
+  } finally {
+    signal.removeEventListener('abort', cancel);
+    cancel();
+  }
 }
 
 function injectAppApprovals() {
@@ -1280,6 +1362,9 @@ function setMode(nextMode, notify = true) {
   }
 
   mode = nextMode;
+  if (mode !== 'compare') {
+    activeProviderId = mode;
+  }
   scheduleSessionSave();
   ensureModeViews(mode);
   syncLayoutToWindowContent();
@@ -1396,6 +1481,12 @@ function registerIpc() {
     return { enabled: restoreWorkspaceEnabled };
   });
 
+  ipcMain.handle('chatclient:set-app-server-config', async (_event, config) => {
+    const state = await appServer.configure(config);
+    scheduleSessionSave();
+    return { ...state, targetProvider: activeProviderId };
+  });
+
   ipcMain.handle('chatclient:set-shell-overlay', (_event, visible) => {
     shellOverlayVisible = Boolean(visible);
     applyViewLayout();
@@ -1495,6 +1586,7 @@ function createWindow() {
   });
 
   mainWindow.on('closed', () => {
+    appServer.stop().catch(() => {});
     for (const view of providerViews.values()) {
       if (!view.webContents.isDestroyed()) {
         view.webContents.close();
@@ -1535,10 +1627,12 @@ app.whenReady().then(() => {
   log.info('modo debug ativo: execução a partir do código-fonte');
   loadSessionState();
   createWindow();
+  appServer.configure(restoredServerConfig).catch((error) => log.warn('Servidor:', error.message));
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {
       createWindow();
+      appServer.configure(appServer.config).catch((error) => log.warn('Servidor:', error.message));
     }
   });
 });
@@ -1547,4 +1641,8 @@ app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') {
     app.quit();
   }
+});
+
+app.on('before-quit', () => {
+  appServer.stop().catch(() => {});
 });

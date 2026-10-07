@@ -97,6 +97,26 @@
             <option value="extra-high">Extra alto</option>
           </select>
         </div>
+        <form class="server-section" id="serverForm">
+          <div class="setting-row">
+            <div>
+              <strong>Servidor OpenAI · Chat ativo</strong>
+              <p>Recebe a última mensagem do cliente na conversa aberta e devolve a resposta. No modo Comparar, usa o último chat selecionado.</p>
+            </div>
+            <button class="switch" id="serverSwitch" type="button" role="switch" aria-checked="false" aria-label="Ativar servidor OpenAI"><span></span></button>
+          </div>
+          <div class="server-fields">
+            <label><span>Host</span><input class="setting-input" id="serverHostInput" type="text" value="127.0.0.1" required autocomplete="off" spellcheck="false"></label>
+            <label><span>Porta</span><input class="setting-input" id="serverPortInput" type="number" value="8787" min="1" max="65535" step="1" required></label>
+            <label class="server-key-field"><span>Chave (key)</span><input class="setting-input" id="serverKeyInput" type="password" autocomplete="new-password" placeholder="Chave usada pelo seu cliente"></label>
+          </div>
+          <div class="server-actions">
+            <button class="tool-button" id="serverSaveButton" type="submit">Salvar servidor</button>
+            <span>Modelo: <code>active-chat</code></span>
+          </div>
+          <p class="server-status" id="serverStatus" role="status" aria-live="polite">Servidor desligado.</p>
+          <p class="server-url" id="serverUrl"></p>
+        </form>
         <div class="setting-row">
           <div>
             <strong>Restaurar trabalho ao iniciar</strong>

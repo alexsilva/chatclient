@@ -16,6 +16,8 @@
     "start": "electron .",
     "dev": "electron .",
     "preview": "node scripts/serve-renderer.js",
+    "test": "node --test tests/*.test.js",
+    "test:ui": "electron --no-sandbox tests/app-server-ui.js",
     "build:linux": "electron-builder --linux --publish never",
     "release:linux": "npm run build:linux"
   },
@@ -29,6 +31,7 @@
     "npmRebuild": false,
     "files": [
       "main.js",
+      "app-server.js",
       "preload.js",
       "renderer/**/*",
       "injections/**/*",

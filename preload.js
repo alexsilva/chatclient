@@ -21,6 +21,7 @@ contextBridge.exposeInMainWorld('chatClient', {
     ipcRenderer.invoke('chatclient:set-app-reasoning-level', level),
   setRestoreWorkspace: (enabled) =>
     ipcRenderer.invoke('chatclient:set-restore-workspace', enabled),
+  setAppServerConfig: (config) => ipcRenderer.invoke('chatclient:set-app-server-config', config),
   setShellOverlay: (visible) => ipcRenderer.invoke('chatclient:set-shell-overlay', visible),
   revealChrome: (target) => ipcRenderer.invoke('chatclient:chrome-reveal', target),
   onState: (callback) => {

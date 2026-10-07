@@ -16,6 +16,14 @@
   const policyNameInput = document.getElementById('policyNameInput');
   const appReasoningSelect = document.getElementById('appReasoningSelect');
   const restoreWorkspaceSwitch = document.getElementById('restoreWorkspaceSwitch');
+  const serverForm = document.getElementById('serverForm');
+  const serverSwitch = document.getElementById('serverSwitch');
+  const serverHostInput = document.getElementById('serverHostInput');
+  const serverPortInput = document.getElementById('serverPortInput');
+  const serverKeyInput = document.getElementById('serverKeyInput');
+  const serverSaveButton = document.getElementById('serverSaveButton');
+  const serverStatus = document.getElementById('serverStatus');
+  const serverUrl = document.getElementById('serverUrl');
   const settingsButton = document.getElementById('settingsButton');
   const settingsPanel = document.getElementById('settingsPanel');
   const closeSettingsButton = document.getElementById('closeSettingsButton');
@@ -35,6 +43,7 @@
     ],
     appReasoningLevel: 'high',
     restoreWorkspaceEnabled: true,
+    appServer: { enabled: false, host: '127.0.0.1', port: 8787, key: '', running: false, busy: false, error: null, targetProvider: 'chatgpt' },
     railVisible: false,
     toolbarVisible: false
   };
@@ -43,6 +52,7 @@
   let dragging = false;
   let previewRailTimer = null;
   let previewToolbarTimer = null;
+  let serverDraftDirty = false;
 
   function showToast(message) {
     toast.textContent = message;
@@ -181,7 +191,55 @@
     restoreWorkspaceSwitch.classList.toggle('active', state.restoreWorkspaceEnabled);
     restoreWorkspaceSwitch.setAttribute('aria-checked', String(state.restoreWorkspaceEnabled));
 
+    renderServer();
+
     updateLayout();
+  }
+
+  function renderServer() {
+    const config = state.appServer;
+    serverSwitch.classList.toggle('active', config.enabled);
+    serverSwitch.setAttribute('aria-checked', String(config.enabled));
+    serverKeyInput.required = config.enabled;
+    if (!serverDraftDirty) {
+      serverHostInput.value = config.host;
+      serverPortInput.value = String(config.port);
+      serverKeyInput.value = config.key;
+    }
+    const provider = config.targetProvider === 'grok' ? 'Grok' : 'ChatGPT';
+    serverStatus.classList.toggle('error', Boolean(config.error));
+    serverStatus.textContent = config.error || (config.running
+      ? `${config.busy ? 'Aguardando resposta' : 'Servidor ativo'} · ${provider}`
+      : isElectron ? 'Servidor desligado.' : 'Prévia: o servidor funciona no aplicativo desktop.');
+    const host = config.host.includes(':') ? `[${config.host.replace(/^\[|\]$/g, '')}]` : config.host;
+    serverUrl.textContent = `Base URL: ${config.baseUrl || `http://${host}:${config.port}/v1`}`;
+  }
+
+  async function saveServer(enabled = state.appServer.enabled) {
+    serverKeyInput.required = enabled;
+    if (!serverForm.reportValidity()) {
+      return;
+    }
+    const config = {
+      enabled, host: serverHostInput.value.trim(),
+      port: Number(serverPortInput.value), key: serverKeyInput.value.trim()
+    };
+    serverSwitch.disabled = true;
+    serverSaveButton.disabled = true;
+    try {
+      state.appServer = isElectron
+        ? await bridge.setAppServerConfig(config)
+        : { ...state.appServer, ...config, error: null };
+      serverDraftDirty = false;
+      renderState();
+      showToast(state.appServer.error || 'Configuração do servidor salva.');
+    } catch (error) {
+      serverStatus.textContent = error.message || 'Não foi possível configurar o servidor.';
+      serverStatus.classList.add('error');
+    } finally {
+      serverSwitch.disabled = false;
+      serverSaveButton.disabled = false;
+    }
   }
 
   function setPreviewChromeVisibility(kind, visible) {
@@ -514,6 +572,13 @@
   restoreWorkspaceSwitch.addEventListener('click', () => {
     setRestoreWorkspaceEnabled(!state.restoreWorkspaceEnabled);
   });
+
+  serverForm.addEventListener('input', () => { serverDraftDirty = true; });
+  serverForm.addEventListener('submit', (event) => {
+    event.preventDefault();
+    saveServer();
+  });
+  serverSwitch.addEventListener('click', () => saveServer(!state.appServer.enabled));
 
   settingsButton.addEventListener('click', openSettings);
   closeSettingsButton.addEventListener('click', closeSettings);

@@ -1,6 +1,6 @@
 {
   "name": "chatclient",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "Linux-friendly multi-provider desktop client for ChatGPT and Grok",
   "main": "main.js",
   "author": {

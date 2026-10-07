@@ -1,6 +1,6 @@
 (() => {
   const API_KEY = '__chatClientAppServer';
-  const VERSION = 2;
+  const VERSION = 3;
   if (window[API_KEY]?.version === VERSION) {
     return;
   }
@@ -83,18 +83,189 @@
     return textOf(element.querySelector('[data-user-message-bubble]') || element);
   }
 
+  // O innerText da resposta já renderizada perderia títulos, listas, ênfases,
+  // links, tabelas e cercas de código. O conversor devolve o markdown de origem.
+  const SKIPPED_TAGS = new Set(['BUTTON', 'SVG', 'IMG', 'STYLE', 'SCRIPT', 'TEMPLATE', 'NOSCRIPT', 'SELECT']);
+  const CONTAINER_TAGS = new Set(['DIV', 'SECTION', 'ARTICLE', 'MAIN', 'FIGURE', 'DETAILS', 'SUMMARY', 'ASIDE']);
+
+  const skipped = (element) => SKIPPED_TAGS.has(element.tagName.toUpperCase()) ||
+    element.getAttribute('data-markdown-copy') === 'exclude';
+
+  function wrap(text, mark) {
+    const [, before, body, after] = /^(\s*)([\s\S]*?)(\s*)$/.exec(text);
+    return body ? `${before}${mark}${body}${mark}${after}` : text;
+  }
+
+  function inlineCode(text) {
+    const mark = '`'.repeat(Math.max(0, ...(text.match(/`+/g) || []).map((run) => run.length)) + 1);
+    const pad = /^`|`$/.test(text) ? ' ' : '';
+    return `${mark}${pad}${text}${pad}${mark}`;
+  }
+
+  function texOf(element) {
+    return element.querySelector('annotation[encoding="application/x-tex"]')?.textContent.trim();
+  }
+
+  function linkOf(anchor) {
+    // As citações do ChatGPT terminam com o contador de fontes extras ("+1").
+    const citation = Boolean(anchor.closest('[data-markdown-copy="contents"]'));
+    const label = inlineChildren(anchor).trim();
+    const text = citation ? label.replace(/\s*\+\d+$/, '') : label;
+    const href = (anchor.getAttribute('href') || '').replace(/ /g, '%20').replace(/[()]/g, (c) => (c === '(' ? '%28' : '%29'));
+    if (!href || /^javascript:/i.test(href)) {
+      return text;
+    }
+    return !text || text === href ? href : `[${text}](${href})`;
+  }
+
+  function inlineChildren(parent) {
+    return [...parent.childNodes].map(inlineOf).join('');
+  }
+
+  function inlineOf(node) {
+    if (node.nodeType === 3) {
+      return node.textContent;
+    }
+    if (node.nodeType !== 1) {
+      return '';
+    }
+    if (node.tagName === 'INPUT') {
+      return node.type === 'checkbox' ? (node.checked ? '[x] ' : '[ ] ') : '';
+    }
+    if (skipped(node)) {
+      return '';
+    }
+    if (node.getAttribute('data-markdown-copy') === 'inline-code' || node.tagName === 'CODE') {
+      return inlineCode(node.textContent);
+    }
+    if (node.classList.contains('katex') && texOf(node)) {
+      return `$${texOf(node)}$`;
+    }
+    switch (node.tagName) {
+      case 'BR': return '  \n';
+      case 'STRONG': case 'B': return wrap(inlineChildren(node), '**');
+      case 'EM': case 'I': return wrap(inlineChildren(node), '*');
+      case 'DEL': case 'S': return wrap(inlineChildren(node), '~~');
+      case 'A': return linkOf(node);
+      default: return inlineChildren(node);
+    }
+  }
+
+  function codeBlock(block) {
+    const code = block.querySelector('code') || block;
+    const text = code.textContent.replace(/\n$/, '');
+    // O ChatGPT atual só informa a linguagem no rótulo do cabeçalho ("Bash",
+    // "Texto simples"); a marcação antiga usa a classe language-*.
+    let language = /language-([\w+#-]+)/.exec(code.className)?.[1] || '';
+    if (!language) {
+      const header = block.querySelector('[data-markdown-copy="exclude"]');
+      const label = (header?.innerText || '').split('\n').map((line) => line.trim()).find(Boolean) || '';
+      language = /\s/.test(label) ? 'text' : label;
+    }
+    const mark = '`'.repeat(Math.max(2, ...(text.match(/`+/g) || []).map((run) => run.length)) + 1);
+    return `${mark}${language.toLowerCase()}\n${text}\n${mark}`;
+  }
+
+  function listOf(list) {
+    const ordered = list.tagName === 'OL';
+    let number = Number.parseInt(list.getAttribute('start'), 10);
+    if (!Number.isFinite(number)) {
+      number = 1;
+    }
+    const items = [...list.children].filter((item) => item.tagName === 'LI' && !skipped(item));
+    const loose = items.some((item) => [...item.children].some((child) => child.tagName === 'P'));
+    return items.map((item) => {
+      const marker = ordered ? `${number++}. ` : '- ';
+      const body = blocksOf(item).join(loose ? '\n\n' : '\n');
+      return marker + body.split('\n').map((line, index) => (index && line ? ' '.repeat(marker.length) + line : line)).join('\n');
+    }).join(loose ? '\n\n' : '\n');
+  }
+
+  function tableOf(table) {
+    const rows = [...table.querySelectorAll('tr')].map((row) =>
+      [...row.children].filter((cell) => cell.tagName === 'TH' || cell.tagName === 'TD'));
+    if (!rows.length) {
+      return '';
+    }
+    const width = Math.max(...rows.map((row) => row.length));
+    const line = (cells) => `|${Array.from({ length: width }, (_, index) => {
+      const text = cells[index] ? blocksOf(cells[index]).join('<br>').replace(/\n/g, '<br>').replace(/\|/g, '\\|') : '';
+      return text ? ` ${text} ` : ' ';
+    }).join('|')}|`;
+    const rule = Array.from({ length: width }, (_, index) => {
+      const align = rows[0][index]?.getAttribute('align');
+      return align === 'right' ? '---:' : align === 'center' ? ':---:' : align === 'left' ? ':---' : '---';
+    });
+    return [line(rows[0]), `| ${rule.join(' | ')} |`, ...rows.slice(1).map(line)].join('\n');
+  }
+
+  // Devolve a lista de blocos de um elemento, ou null quando o nó é inline.
+  function blockOf(node) {
+    if (node.nodeType !== 1) {
+      return null;
+    }
+    const tag = node.tagName;
+    if (node.getAttribute('data-markdown-copy') === 'code-block' || tag === 'PRE') {
+      return [codeBlock(node)];
+    }
+    if (node.classList.contains('katex-display') && texOf(node)) {
+      return [`$$\n${texOf(node)}\n$$`];
+    }
+    if (/^H[1-6]$/.test(tag)) {
+      const text = inlineChildren(node).trim();
+      return text ? [`${'#'.repeat(Number(tag[1]))} ${text}`] : [];
+    }
+    switch (tag) {
+      case 'P': return [inlineChildren(node).trim()].filter(Boolean);
+      case 'UL': case 'OL': return [listOf(node)];
+      case 'TABLE': return [tableOf(node)];
+      case 'HR': return ['---'];
+      case 'BLOCKQUOTE': return [blocksOf(node).join('\n\n').split('\n').map((line) => (line ? `> ${line}` : '>')).join('\n')];
+      default: return CONTAINER_TAGS.has(tag) ? blocksOf(node) : null;
+    }
+  }
+
+  function blocksOf(parent) {
+    const blocks = [];
+    let run = '';
+    const flush = () => {
+      if (run.trim()) {
+        blocks.push(run.trim());
+      }
+      run = '';
+    };
+    for (const node of parent.childNodes) {
+      if (node.nodeType === 1 && skipped(node)) {
+        continue;
+      }
+      const block = blockOf(node);
+      if (block) {
+        flush();
+        blocks.push(...block);
+      } else {
+        run += inlineOf(node);
+      }
+    }
+    flush();
+    return blocks;
+  }
+
+  const markdownOf = (root) => (root ? blocksOf(root).join('\n\n') : '');
+
   function answerText(element) {
-    const blocks = [...element.querySelectorAll(
+    const found = [...element.querySelectorAll(
       '.markdown, .response-content-markdown, [data-markdown-text-style="assistant-message"]'
     )];
+    // As gerações do ChatGPT aninham esses marcadores: só o mais externo conta.
+    const blocks = found.filter((block) => !found.some((other) => other !== block && other.contains(block)));
     if (blocks.length) {
-      return blocks.map(textOf).join('\n\n');
+      return blocks.map(markdownOf).filter(Boolean).join('\n\n');
     }
     if (element.matches('.response-content-markdown, [data-testid="assistant-message"]')) {
-      return textOf(element);
+      return markdownOf(element);
     }
     // O corpo sem markdown é usado por algumas respostas curtas do ChatGPT.
-    return textOf(element.querySelector('[data-message-content]'));
+    return markdownOf(element.querySelector('[data-message-content]'));
   }
 
   function turnComplete(element) {

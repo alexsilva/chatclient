@@ -112,7 +112,7 @@ button.addEventListener('click', () => {
   turn.appendChild(reply);
   document.getElementById('messages').appendChild(turn);
   setTimeout(() => {
-    markdown.textContent = 'Resposta final: ' + message;
+    if (window.richReply) { markdown.innerHTML = window.richReply; } else { markdown.textContent = 'Resposta final: ' + message; }
     const copy = document.createElement('button');
     copy.type = 'button';
     copy.dataset.testid = 'copy-turn-action-button';
@@ -279,6 +279,38 @@ app.whenReady().then(async () => {
   assert.equal(response.status, 200, JSON.stringify(modernAnswer));
   assert.equal(modernAnswer.choices[0].message.content, 'Resposta final: ChatGPT atual\nSegunda linha');
   assert.equal(await page('window.sentMessages.at(-1)'), 'ChatGPT atual\nSegunda linha');
+
+  // A resposta renderizada volta como o markdown de origem, não como o texto plano da tela.
+  const richHtml = [
+    '<h2>Título</h2>',
+    '<p><span>Texto com </span><strong><span>negrito</span></strong><span>, </span><span data-markdown-copy="inline-code">código</span><span> e </span><a href="https://example.com/x">link</a><span>.</span></p>',
+    '<ul><li><span>um</span></li><li><span>dois</span><ul><li><span>aninhado</span></li></ul></li></ul>',
+    '<ol start="3"><li><span>três</span></li><li><span>quatro</span></li></ol>',
+    '<blockquote><p><span>Citação com </span><strong><span>ênfase</span></strong></p></blockquote>',
+    '<div data-markdown-copy="code-block"><div data-markdown-copy="exclude"><svg></svg><div>Bash</div><button type="button">Copiar</button></div><div><code><span>echo "a"</span>\n<span>ls</span></code></div></div>',
+    '<div data-markdown-copy="code-block"><div data-markdown-copy="exclude"><div>Texto simples</div><button type="button">Copiar</button></div><div><code>```\nx\n```</code></div></div>',
+    '<div><table><thead><tr><th>Nome</th><th align="right">Valor</th></tr></thead><tbody><tr><td>a | b</td><td align="right">1</td></tr></tbody></table><div data-markdown-copy="exclude"><button type="button">Copiar tabela</button></div></div>',
+    '<hr>',
+    '<p><span>Fim.</span><span data-markdown-copy="contents"><a href="https://docs.example"><span>Doc</span><span>+1</span></a></span></p>'
+  ].join('');
+  const richMarkdown = [
+    '## Título',
+    'Texto com **negrito**, `código` e [link](https://example.com/x).',
+    '- um\n- dois\n  - aninhado',
+    '3. três\n4. quatro',
+    '> Citação com **ênfase**',
+    '```bash\necho "a"\nls\n```',
+    '````text\n```\nx\n```\n````',
+    '| Nome | Valor |\n| --- | ---: |\n| a \\| b | 1 |',
+    '---',
+    'Fim.[Doc](https://docs.example)'
+  ].join('\n\n');
+  await page(`window.richReply = ${JSON.stringify(richHtml)};`);
+  response = await request('Resposta formatada');
+  const richAnswer = await response.json();
+  assert.equal(response.status, 200, JSON.stringify(richAnswer));
+  assert.equal(richAnswer.choices[0].message.content, richMarkdown);
+  await page('window.richReply = null;');
 
   // O modo atual define o alvo sem criar uma conversa para a API.
   await shell('window.chatClient.setMode("grok")');

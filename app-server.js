@@ -242,6 +242,7 @@ class AppServer {
     const model = typeof body.model === 'string' && body.model ? body.model : MODEL_ID;
     let heartbeat = null;
     let streamed = '';
+    let reasoning = '';
     const event = (data) => response.write(`data: ${JSON.stringify(data)}\n\n`);
     const chunk = (delta, finishReason = null) => event({
       id, object: 'chat.completion.chunk', created, model,
@@ -275,7 +276,7 @@ class AppServer {
       controller.signal.addEventListener('abort', aborted, { once: true });
     });
     try {
-      const text = await Promise.race([
+      const result = await Promise.race([
         this.relay({
           id, message, signal: controller.signal, onStart: startStream,
           onDelta: (delta) => {
@@ -284,6 +285,15 @@ class AppServer {
               streamed += delta;
               chunk({ content: delta });
             }
+          },
+          onReasoningDelta: (delta) => {
+            if (!controller.signal.aborted && !response.destroyed && typeof delta === 'string' && delta) {
+              reasoning += delta;
+              if (body.stream) {
+                startStream();
+                chunk({ reasoning_content: delta });
+              }
+            }
           }
         }),
         abortPromise
@@ -291,8 +301,20 @@ class AppServer {
       if (controller.signal.aborted || response.destroyed) {
         return;
       }
+      const text = typeof result === 'string' ? result : result?.text;
       if (typeof text !== 'string' || !text.trim()) {
         throw new AppServerError('O chat não produziu uma resposta de texto.', 502, 'empty_response');
+      }
+      if (result?.reasoning) {
+        if (typeof result.reasoning !== 'string' || !result.reasoning.startsWith(reasoning)) {
+          throw new AppServerError('O thinking mudou durante o envio.', 502, 'reasoning_changed');
+        }
+        const rest = result.reasoning.slice(reasoning.length);
+        reasoning = result.reasoning;
+        if (body.stream && rest) {
+          startStream();
+          chunk({ reasoning_content: rest });
+        }
       }
       if (body.stream) {
         startStream();
@@ -307,7 +329,9 @@ class AppServer {
       } else {
         sendJson(response, 200, {
           id, object: 'chat.completion', created, model,
-          choices: [{ index: 0, message: { role: 'assistant', content: text }, logprobs: null, finish_reason: 'stop' }]
+          choices: [{ index: 0, message: {
+            role: 'assistant', content: text, ...(reasoning ? { reasoning_content: reasoning } : {})
+          }, logprobs: null, finish_reason: 'stop' }]
         });
       }
     } catch (error) {

@@ -44,13 +44,19 @@ Configure seu cliente com:
 - **API key:** a chave definida no modal, enviada como `Authorization: Bearer <key>`.
 - **Modelo:** `active-chat`, um alias para o chat aberto. O modelo real continua sendo escolhido na interface do provedor.
 
-A ponte oferece `GET /v1/models` e `POST /v1/chat/completions`, com o formato de [Chat Completions](https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create). Ela envia **somente o texto da última mensagem `user`** ao campo da conversa atual e devolve o corpo da resposta exibida. Histórico recebido, mensagens `system`/`developer` e parâmetros de geração não são enviados ao chat. Nenhuma conversa é criada, selecionada ou mantida pelo servidor.
+A ponte oferece `GET /v1/models` e `POST /v1/chat/completions`, com o formato de [Chat Completions](https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create). Ela envia **somente o texto da última mensagem `user`** à conversa atual e devolve o corpo da resposta exibida. Histórico recebido, mensagens `system`/`developer` e parâmetros de geração não são enviados ao chat. Nenhuma conversa é criada, selecionada ou mantida pelo servidor.
+
+No ChatGPT, a ponte chama o callback nativo de envio com o texto completo, sem preencher nem processar o editor. O histórico, o modelo e o transporte continuam sendo os da página. Se esse contrato não estiver disponível, ela usa o campo e o botão de envio; o Grok também usa esse caminho. Depois de tentar o callback, uma falha retorna erro sem repetir o envio pelo botão, para evitar mensagens duplicadas.
 
 ChatGPT e Grok usam a view já aberta. No modo **Comparar**, o alvo é o último chat que recebeu foco; cada pedido permanece ligado àquela conversa até terminar. A mensagem enviada e a resposta ficam na UI do provedor e são retornadas ao cliente.
 
-`stream: true` retorna SSE: o conteúdo é entregue quando a UI conclui a resposta, seguido de `finish_reason: stop` e `[DONE]`. Isso evita devolver versões intermediárias alteradas pela renderização do markdown. Não há estimativa de consumo de tokens. A ponte aceita texto; anexos e chamadas de ferramentas não são convertidos em respostas da API.
+O resumo de raciocínio é devolvido em `message.reasoning_content` no JSON, separado de `message.content`. No ChatGPT, a ponte lê uma cópia do SSE que a própria página recebe para o pedido (`/backend-api/f/conversation`) e extrai as etapas `thoughts`, na ordem em que chegam: o título em negrito e o texto de cada etapa. É o mesmo resumo do painel de atividade do ChatGPT, não os tokens internos do modelo; o DOM mostra só os títulos. Respostas rápidas costumam não ter etapas (a UI mostra apenas “Pensou por Xs”), e então o campo é omitido.
 
-Abra uma conversa existente antes de usar o servidor. Se houver um rascunho, uma geração em andamento ou outro pedido pendente, a ponte retorna um erro sem sobrescrever o campo. Trocar de conversa durante o pedido também retorna erro. Desconectar o cliente cancela a espera, e a geração já iniciada permanece na UI.
+Sem esse stream, e no Grok, a ponte lê os resumos visíveis no DOM: abre os painéis “Pensando”/“Pensou…” do pedido atual quando necessário e os recolhe ao terminar. Indicadores como “ChatGPT está respondendo” e rótulos como “Pensando” não são enviados nesse campo. Os resumos capturados são preservados como um transcript, inclusive quando a página substitui ou recolhe um resumo durante a geração.
+
+`stream: true` retorna SSE: o thinking é entregue durante a geração em `delta.reasoning_content`. O corpo final em markdown chega em `delta.content` quando a UI conclui a resposta, seguido de `finish_reason: stop` e `[DONE]`. Isso preserva a formatação, que pode mudar durante a renderização. O Quimera já interpreta `reasoning_content`; outros clientes precisam reconhecer essa extensão. Não há estimativa de consumo de tokens. A ponte aceita texto; anexos e chamadas de ferramentas não são convertidos em respostas da API.
+
+Abra uma conversa existente antes de usar o servidor. Se houver um rascunho, anexos no composer nativo, uma geração em andamento ou outro pedido pendente, a ponte retorna um erro sem sobrescrever o campo. Trocar de conversa durante o pedido também retorna erro. Desconectar o cliente cancela a espera; a guarda nativa invalida um envio direto ainda em preparação, e a geração já iniciada permanece na UI.
 
 Exemplo:
 
@@ -84,6 +90,8 @@ npm start
 ### Log e modo debug
 
 O ChatClient só escreve log quando roda a partir do código-fonte. Instalado — `.deb` ou AppImage —, `app.isPackaged` é verdadeiro, o modo debug fica desligado e o cliente fica em silêncio: nem o processo principal, nem as injeções, e o Chromium reduzido a falhas fatais.
+
+Em dev, `injections/app-server.js` é relido a cada pedido da ponte. Alterações em `main.js` ou no servidor HTTP ainda exigem reiniciar o aplicativo.
 
 Com o modo debug ativo, o console das views é reemitido no processo principal e sai junto do `npm start`:
 
@@ -131,7 +139,7 @@ BrowserWindow
     └── https://grok.com/
 ```
 
-`main.js` controla ciclo de vida, navegação e layout dos provedores. `app-server.js` oferece o servidor HTTP e chama a ponte da view ativa; `injections/app-server.js` envia pelo campo da página e observa a resposta. `preload.js` expõe apenas a ponte IPC necessária ao shell. Scripts específicos de páginas ficam em `injections/`.
+`main.js` controla ciclo de vida, navegação e layout dos provedores. `app-server.js` oferece o servidor HTTP e chama a ponte da view ativa; `injections/app-server.js` envia pelo callback nativo do ChatGPT (ou pelo campo da página) e observa o thinking visível e a resposta. `preload.js` expõe apenas a ponte IPC necessária ao shell. Scripts específicos de páginas ficam em `injections/`.
 
 ## Release
 

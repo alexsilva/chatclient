@@ -81,6 +81,8 @@ const PROVIDERS = {
 };
 
 const MODES = new Set(['chatgpt', 'grok', 'compare']);
+const MIN_WINDOW_WIDTH = 735;
+const MIN_WINDOW_HEIGHT = 640;
 const DEFAULT_LAYOUT = {
   x: 0,
   y: 0,
@@ -124,7 +126,8 @@ const APP_REASONING_SCRIPT = readFileSync(
   join(__dirname, 'injections', 'app-reasoning.js'),
   'utf8'
 );
-const APP_SERVER_SCRIPT = readFileSync(join(__dirname, 'injections', 'app-server.js'), 'utf8');
+const APP_SERVER_SCRIPT_PATH = join(__dirname, 'injections', 'app-server.js');
+const APP_SERVER_SCRIPT = readFileSync(APP_SERVER_SCRIPT_PATH, 'utf8');
 
 let mainWindow = null;
 let providerViews = new Map();
@@ -413,8 +416,8 @@ function getRestoredWindowOptions() {
     return fallback;
   }
 
-  const width = Math.max(980, Math.round(saved.width));
-  const height = Math.max(640, Math.round(saved.height));
+  const width = Math.max(MIN_WINDOW_WIDTH, Math.round(saved.width));
+  const height = Math.max(MIN_WINDOW_HEIGHT, Math.round(saved.height));
 
   if (!Number.isFinite(saved.x) || !Number.isFinite(saved.y)) {
     return { width, height };
@@ -1069,7 +1072,7 @@ function runInjection(contents, script) {
   );
 }
 
-async function relayActiveChat({ id, message, signal, onStart }) {
+async function relayActiveChat({ id, message, signal, onStart, onReasoningDelta }) {
   // Nunca cria view, navega ou escolhe uma conversa: prende o pedido à view
   // que já estava ativa quando ele chegou.
   const providerId = activeProviderId;
@@ -1094,7 +1097,10 @@ async function relayActiveChat({ id, message, signal, onStart }) {
   signal.addEventListener('abort', cancel, { once: true });
   try {
     signal.throwIfAborted();
-    await runInjection(contents, APP_SERVER_SCRIPT);
+    // Em dev, aplica alterações da ponte no próximo pedido sem manter uma
+    // versão antiga do arquivo em memória até o aplicativo ser reiniciado.
+    const bridgeScript = debugMode ? readFileSync(APP_SERVER_SCRIPT_PATH, 'utf8') : APP_SERVER_SCRIPT;
+    await runInjection(contents, debugMode ? `delete window.__chatClientAppServer;\n${bridgeScript}` : bridgeScript);
     signal.throwIfAborted();
     const started = await contents.executeJavaScript(
       `window.__chatClientAppServer.begin(${JSON.stringify({ id, providerId, message })})`, true
@@ -1102,6 +1108,7 @@ async function relayActiveChat({ id, message, signal, onStart }) {
     checkResult(started);
     signal.throwIfAborted();
     onStart();
+    let reasoning = '';
     for (;;) {
       signal.throwIfAborted();
       if (contents.isDestroyed()) {
@@ -1109,12 +1116,17 @@ async function relayActiveChat({ id, message, signal, onStart }) {
       }
       const result = await contents.executeJavaScript(`window.__chatClientAppServer.poll(${requestId})`);
       checkResult(result);
+      signal.throwIfAborted();
+      if (result.reasoning?.startsWith(reasoning) && result.reasoning.length > reasoning.length) {
+        onReasoningDelta(result.reasoning.slice(reasoning.length));
+        reasoning = result.reasoning;
+      }
       if (result.done) {
         // Espera a UI concluir: o markdown pode substituir texto durante a
         // geração. O cliente recebe exatamente o corpo final, também em SSE.
-        return result.text;
+        return { text: result.text, reasoning };
       }
-      await wait(250, undefined, { signal });
+      await wait(150, undefined, { signal });
     }
   } finally {
     signal.removeEventListener('abort', cancel);
@@ -1517,8 +1529,8 @@ function createWindow() {
 
   mainWindow = new BrowserWindow({
     ...restoredWindowOptions,
-    minWidth: 980,
-    minHeight: 640,
+    minWidth: MIN_WINDOW_WIDTH,
+    minHeight: MIN_WINDOW_HEIGHT,
     autoHideMenuBar: true,
     backgroundColor: '#11151a',
     title: 'ChatClient',

@@ -88,6 +88,68 @@ test('stream SSE mantém o texto, termina com stop e [DONE]', async (t) => {
   assert.equal(chunks.at(-1).choices[0].finish_reason, 'stop');
 });
 
+test('JSON devolve thinking separado do markdown da resposta, sem duplicar deltas', async (t) => {
+  const { request } = await setup(t, async ({ onReasoningDelta }) => {
+    onReasoningDelta('Conferindo ');
+    return { text: '**Resposta final**', reasoning: 'Conferindo a solicitação.' };
+  });
+  const response = await request(prompt());
+  assert.equal(response.status, 200);
+  assert.deepEqual((await response.json()).choices[0].message, {
+    role: 'assistant', content: '**Resposta final**', reasoning_content: 'Conferindo a solicitação.'
+  });
+});
+
+test('SSE entrega thinking antes de a resposta terminar e preserva os dois campos', async (t) => {
+  let finish;
+  const final = new Promise((resolve) => { finish = resolve; });
+  const { request } = await setup(t, async ({ onReasoningDelta }) => {
+    onReasoningDelta('Conferindo a solicitação.');
+    await final;
+    return { text: '## Resposta\n\nPronta.', reasoning: 'Conferindo a solicitação.\n\nVerificação concluída.' };
+  });
+  const response = await request({ ...prompt(), stream: true });
+  assert.equal(response.status, 200);
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let output = '';
+  while (!output.includes('reasoning_content')) {
+    const { value, done } = await reader.read();
+    assert.equal(done, false);
+    output += decoder.decode(value, { stream: true });
+  }
+  assert.doesNotMatch(output, /Resposta|finish_reason":"stop/);
+  finish();
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) { break; }
+    output += decoder.decode(value, { stream: true });
+  }
+  const events = output.split('\n\n').filter((line) => line.startsWith('data: ')).map((line) => line.slice(6));
+  assert.equal(events.pop(), '[DONE]');
+  const chunks = events.map(JSON.parse);
+  assert.equal(chunks.map((chunk) => chunk.choices[0].delta.reasoning_content || '').join(''),
+    'Conferindo a solicitação.\n\nVerificação concluída.');
+  assert.equal(chunks.map((chunk) => chunk.choices[0].delta.content || '').join(''), '## Resposta\n\nPronta.');
+  assert.equal(chunks.at(-1).choices[0].finish_reason, 'stop');
+});
+
+test('reasoning_content é omitido quando a UI não expõe thinking', async (t) => {
+  const { request } = await setup(t, async () => ({ text: 'Resposta', reasoning: '' }));
+  assert.equal('reasoning_content' in (await (await request(prompt())).json()).choices[0].message, false);
+});
+
+test('erro após thinking em SSE não retorna uma conclusão falsa', async (t) => {
+  const { request } = await setup(t, async ({ onReasoningDelta }) => {
+    onReasoningDelta('Conferindo.');
+    throw new AppServerError('A conversa mudou', 409, 'chat_changed');
+  });
+  const output = await (await request({ ...prompt(), stream: true })).text();
+  assert.match(output, /reasoning_content/);
+  assert.match(output, /"code":"chat_changed"/);
+  assert.doesNotMatch(output, /"finish_reason":"stop"/);
+});
+
 test('rejeita JSON inválido, imagens, mensagem vazia e pedidos grandes antes de tocar no chat', async (t) => {
   let calls = 0;
   const { request } = await setup(t, async () => { calls++; return 'Resposta'; });

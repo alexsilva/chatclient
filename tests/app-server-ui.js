@@ -214,6 +214,56 @@ window.submitMessage = (message, options = {}) => {
   return true;
 };
 button.addEventListener('click', () => window.submitMessage(editor.innerText.trim()));
+// Mensagem avulsa no markup em uso, para turnos que não passam por submitMessage.
+window.addMessage = (role, id, text) => {
+  const element = document.createElement('div');
+  if (window.modernMarkup) {
+    element.dataset.chatgptSearchUnitKey = id + ':' + role;
+    element.dataset.chatgptSearchMessageIds = id;
+  } else {
+    element.dataset.messageAuthorRole = role;
+    element.dataset.messageId = id;
+  }
+  const body = document.createElement('div');
+  if (role === 'user') { body.dataset.userMessageBubble = 'true'; } else if (window.modernMarkup) {
+    body.dataset.markdownTextStyle = 'assistant-message';
+  } else { body.className = 'markdown'; }
+  body.textContent = text;
+  element.append(body);
+  const turn = document.createElement('article');
+  turn.dataset.testid = 'conversation-turn-' + id;
+  if (window.modernMarkup) { turn.dataset.talvtTurnState = 'complete'; }
+  turn.append(element);
+  if (role === 'assistant') {
+    const copy = document.createElement('button');
+    copy.type = 'button';
+    copy.dataset.testid = 'copy-turn-action-button';
+    copy.textContent = 'Copiar';
+    turn.append(copy);
+  }
+  document.getElementById('messages').append(turn);
+};
+// Turno iniciado direto na UI e ainda em andamento quando a ponte recebe o pedido.
+window.startRunningTurn = (message) => {
+  window.sentMessages.push(message);
+  window.steered = [];
+  window.addMessage('user', 'running-user', message);
+  button.dataset.testid = 'stop-button';
+  button.setAttribute('aria-label', 'Parar');
+  button.textContent = 'Parar';
+  window.directProps.isStreaming = true;
+  fetch('/backend-api/f/conversation', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ hold: true, message, conversation: location.pathname.split('/c/')[1], turn: 'running-turn' })
+  }).then((response) => response.text()).then(() => {
+    window.addMessage('assistant', 'running-assistant', 'Resposta final: ' + (window.steered.at(-1) || message));
+    button.dataset.testid = window.modernMarkup ? '' : 'send-button';
+    button.setAttribute('aria-label', 'Enviar mensagem');
+    button.textContent = 'Enviar';
+    button.disabled = true;
+    window.directProps.isStreaming = false;
+  });
+};
 window.enableDirectSubmit = () => {
   const form = editor.closest('form');
   window.directCalls = [];
@@ -226,6 +276,15 @@ window.enableDirectSubmit = () => {
       window.directCalls.push({ message, navigation, preserveDraft: options.preserveDraft });
       if (window.directSubmitDelay) { await new Promise(resolve => setTimeout(resolve, window.directSubmitDelay)); }
       if (!options.isSubmissionCurrent() || window.directResult === false) { return false; }
+      if (window.directProps.isStreaming) {
+        // Steering: a mensagem entra no turno em andamento por um endpoint próprio.
+        if (!window.directProps.isSteeringEnabled) { return false; }
+        window.sentMessages.push(message);
+        window.steered.push(message);
+        window.addMessage('user', 'steer-' + window.steered.length, message);
+        await fetch('/backend-api/f/steer_turn', { method: 'POST', body: JSON.stringify({ message }) });
+        return true;
+      }
       const accepted = window.submitMessage(message, options);
       if (window.directError) { throw new Error('Falha após chamar o envio nativo'); }
       return accepted;
@@ -290,6 +349,56 @@ function thoughtStream({ message, conversation, turn }) {
   }), { headers: { 'Content-Type': 'text/event-stream; charset=utf-8' } });
 }
 
+// Turno longo cujo SSE já estava aberto antes do pedido. Com steering, a
+// mensagem chega no mesmo SSE como nova mensagem do usuário, seguida da resposta.
+function runningStream({ message, conversation, turn }) {
+  const encoder = new TextEncoder();
+  let controller;
+  const send = (text) => controller.enqueue(encoder.encode(text));
+  const delta = (data) => send(`event: delta\ndata: ${JSON.stringify(data)}\n\n`);
+  const item = (id, role, content, extra = {}) => ({
+    message: { id, author: { role }, content, metadata: { turn_exchange_id: turn }, ...extra }, conversation_id: conversation
+  });
+  const close = () => {
+    send('data: [DONE]\n\n');
+    controller.close();
+  };
+  const response = new Response(new ReadableStream({
+    start(streamController) {
+      controller = streamController;
+      send('event: delta_encoding\ndata: "v1"\n\n');
+      send(`data: ${JSON.stringify({ type: 'input_message', conversation_id: conversation, input_message: {
+        author: { role: 'user' }, content: { content_type: 'text', parts: [message] }, metadata: { turn_exchange_id: turn } } })}\n\n`);
+      delta({ p: '', o: 'add', v: item('running-t1', 'assistant', { content_type: 'thoughts',
+        thoughts: [{ summary: 'Turno anterior', content: 'Não deve aparecer.' }] }), c: 0 });
+      delta({ p: '', o: 'add', v: item('running-preamble', 'assistant', { content_type: 'text', parts: ['Progresso anterior.'] },
+        { channel: 'commentary' }), c: 1 });
+    }
+  }), { headers: { 'Content-Type': 'text/event-stream; charset=utf-8' } });
+  return {
+    response,
+    async steer(text) {
+      await wait(150);
+      delta({ p: '', o: 'add', v: item('steer-user', 'user', { content_type: 'text', parts: [text] }), c: 2 });
+      // Atualizações do que veio antes da mensagem não pertencem ao pedido.
+      delta({ p: '/message/content/thoughts/0/content', o: 'append', v: ' Ainda não.', c: 0 });
+      delta({ p: '', o: 'add', v: item('steer-t1', 'assistant', { content_type: 'thoughts',
+        thoughts: [{ summary: 'Lendo a nova mensagem', content: 'Vou responder no mesmo turno.' }] }), c: 3 });
+      delta({ p: '', o: 'add', v: item('steer-answer', 'assistant', { content_type: 'text', parts: ['Resposta final: '] },
+        { channel: 'final' }), c: 4 });
+      await wait(400);
+      delta({ p: '/message/content/parts/0', o: 'append', v: text });
+      delta({ p: '/message/status', o: 'replace', v: 'finished_successfully' });
+      close();
+    },
+    finish() {
+      delta({ p: '', o: 'add', v: item('running-answer', 'assistant', { content_type: 'text', parts: ['Resposta final: ' + message] },
+        { channel: 'final', status: 'finished_successfully' }), c: 2 });
+      close();
+    }
+  };
+}
+
 async function freePort() {
   const socket = http.createServer();
   socket.listen(0, '127.0.0.1');
@@ -300,11 +409,23 @@ async function freePort() {
 }
 
 app.whenReady().then(async () => {
-  session.defaultSession.protocol.handle('https', async (request) => (
-    new URL(request.url).pathname === '/backend-api/f/conversation'
-      ? thoughtStream(JSON.parse(await request.text()))
-      : new Response(fixture, { headers: { 'Content-Type': 'text/html; charset=utf-8' } })
-  ));
+  let runningTurn = null;
+  session.defaultSession.protocol.handle('https', async (request) => {
+    const path = new URL(request.url).pathname;
+    if (path === '/backend-api/f/conversation') {
+      const body = JSON.parse(await request.text());
+      if (!body.hold) {
+        return thoughtStream(body);
+      }
+      runningTurn = runningStream(body);
+      return runningTurn.response;
+    }
+    if (path === '/backend-api/f/steer_turn') {
+      runningTurn.steer(JSON.parse(await request.text()).message);
+      return new Response('null', { headers: { 'Content-Type': 'application/json' } });
+    }
+    return new Response(fixture, { headers: { 'Content-Type': 'text/html; charset=utf-8' } });
+  });
   const window = await eventually(() => BrowserWindow.getAllWindows()[0]);
   const shell = (script) => window.webContents.executeJavaScript(script, true);
   await eventually(() => !window.webContents.isLoading());
@@ -569,6 +690,44 @@ app.whenReady().then(async () => {
   response = await request('Stream de outra mensagem');
   assert.equal((await response.json()).choices[0].message.reasoning_content, 'Pensamento que não faz parte da resposta');
   await page('window.streamThoughts = false; window.streamInput = null; window.responseDelay = 150;');
+
+  // Steering: com um turno em andamento, o ChatGPT aceita outra mensagem no
+  // mesmo turno. A resposta chega pelo SSE que a página abriu antes do pedido.
+  const generating = 'document.querySelector("form button[aria-label=Parar]") !== null';
+  await page('window.directProps.isSteeringEnabled = true; window.startRunningTurn("Turno digitado na UI");');
+  await eventually(() => page(generating));
+  response = await request('Mensagem durante o turno', { stream: true });
+  const steerReader = response.body.getReader();
+  let steerText = '';
+  while (!steerText.includes('Resposta final: ')) {
+    const { value, done } = await steerReader.read();
+    assert.equal(done, false);
+    steerText += liveDecoder.decode(value, { stream: true });
+  }
+  assert.equal(await page(generating), true);
+  for (;;) {
+    const { value, done } = await steerReader.read();
+    if (done) { break; }
+    steerText += liveDecoder.decode(value, { stream: true });
+  }
+  const steerEvents = steerText.split('\n\n').filter((line) => line.startsWith('data: '))
+    .map((line) => line.slice(6)).filter((line) => line !== '[DONE]').map(JSON.parse);
+  assert.equal(steerEvents.map((event) => event.choices[0].delta.reasoning_content || '').join(''),
+    '**Lendo a nova mensagem**\n\nVou responder no mesmo turno.');
+  assert.equal(steerEvents.map((event) => event.choices[0].delta.content || '').join(''), 'Resposta final: Mensagem durante o turno');
+  assert.deepEqual(await page('window.steered'), ['Mensagem durante o turno']);
+  await eventually(() => page('window.directProps.isStreaming === false'));
+
+  // Sem steering, a UI não aceita a mensagem: a ponte espera o turno terminar.
+  await page('window.directProps.isSteeringEnabled = false; window.startRunningTurn("Outro turno na UI");');
+  await eventually(() => page(generating));
+  const afterTurn = request('Mensagem depois do turno');
+  await wait(800);
+  assert.equal(await page('window.sentMessages.includes("Mensagem depois do turno")'), false);
+  runningTurn.finish();
+  response = await afterTurn;
+  assert.equal((await response.json()).choices[0].message.content, 'Resposta final: Mensagem depois do turno');
+  assert.deepEqual(await page('window.steered'), []);
   await page('window.activityThinking = true; window.responseDelay = 1800;');
 
   // O painel atual usa aria-labelledby e monta seu markdown só ao abrir.
@@ -714,7 +873,7 @@ app.whenReady().then(async () => {
   writeFileSync(screenshotPath, (await window.webContents.capturePage()).toPNG());
   await shell('document.getElementById("serverSwitch").click();');
   await eventually(() => shell('window.chatClient.getState().then(state => !state.appServer.running)'));
-  console.log('Testes integrados Electron: OK. Modal, HTTP, ChatGPT/Grok, SSE, thinking ao vivo, envio direto, fallback, rascunho, cancelamento, concorrência e troca de conversa.');
+  console.log('Testes integrados Electron: OK. Modal, HTTP, ChatGPT/Grok, SSE, thinking ao vivo, envio direto, steering, espera do turno, fallback, rascunho, cancelamento, concorrência e troca de conversa.');
   console.log(`Screenshot do modal: ${screenshotPath}`);
   app.exit(0);
 }).catch((error) => {

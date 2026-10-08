@@ -1,7 +1,7 @@
 (() => {
   const API_KEY = '__chatClientAppServer';
   const TAP_KEY = '__chatClientAppServerTap';
-  const VERSION = 10;
+  const VERSION = 11;
   if (window[API_KEY]?.version === VERSION) {
     return;
   }
@@ -182,7 +182,7 @@
 
   function observeReasoning(request) {
     request.observer = new MutationObserver(() => {
-      if (pending !== request || conversationUrl() !== request.url || request.streamed) {
+      if (pending !== request || conversationUrl() !== request.url || request.stream) {
         return;
       }
       const latestUser = messages('user', request.providerId).at(-1);
@@ -204,23 +204,21 @@
 
   // O ChatGPT entrega cada etapa do raciocínio no SSE da própria página, com
   // título e texto; o DOM mostra só os títulos. A ponte lê uma cópia desse
-  // stream enquanto há um pedido pendente, sem alterar a resposta da página.
+  // stream, sem alterar a resposta da página. Todo SSE de conversa é seguido
+  // desde o início: uma mensagem enviada durante um turno em andamento
+  // (steering) chega no SSE que a página já tinha aberto.
   const STREAM_PATH = /^\/backend-api\/(?:f\/)?conversation(?:\/|$)/;
   const plain = (value) => (typeof value === 'string' ? value : '');
+  const partsText = (parts) => (Array.isArray(parts) ? parts.map(plain).join('') : '').replace(/\r\n/g, '\n').trim();
 
   function tapStream(response) {
-    const request = pending;
-    if (!request || request.providerId !== 'chatgpt' || !request.submitted || conversationUrl() !== request.url ||
-      !response.body || !(response.headers.get('content-type') || '').includes('text/event-stream') ||
+    if (!response.body || !(response.headers.get('content-type') || '').includes('text/event-stream') ||
       !STREAM_PATH.test(new URL(response.url, location.href).pathname)) {
       return;
     }
+    const stream = { roots: new Map(), channel: 0, path: '', op: '', conversationId: null };
     const reader = response.clone().body.getReader();
-    request.readers.add(reader);
-    readStream(request, reader).catch(() => {}).finally(() => {
-      request.readers.delete(reader);
-      reader.cancel().catch(() => {});
-    });
+    readStream(stream, reader).catch(() => {}).finally(() => reader.cancel().catch(() => {}));
   }
 
   if (!window[TAP_KEY] && /(?:^|\.)chatgpt\.com$/.test(location.hostname)) {
@@ -240,32 +238,33 @@
     window[TAP_KEY] = tap;
   }
   // Versões recarregadas da ponte trocam só o leitor, sem empilhar wrappers.
+  // Streams abertos por uma versão anterior passam a ser lidos pela atual.
   if (window[TAP_KEY]) {
     window[TAP_KEY].listener = tapStream;
+    window[TAP_KEY].onEvent = readEvent;
   }
 
-  async function readStream(request, reader) {
+  async function readStream(stream, reader) {
     const decoder = new TextDecoder();
-    const stream = { roots: new Map(), channel: 0, path: '', op: '', foreign: false };
     let buffer = '';
-    while (pending === request && !stream.foreign) {
+    for (;;) {
       const { done, value } = await reader.read();
       if (done) {
         return;
       }
       buffer += decoder.decode(value, { stream: true }).replace(/\r\n/g, '\n');
-      for (let end = buffer.indexOf('\n\n'); end >= 0 && !stream.foreign; end = buffer.indexOf('\n\n')) {
+      for (let end = buffer.indexOf('\n\n'); end >= 0; end = buffer.indexOf('\n\n')) {
         const data = buffer.slice(0, end).split('\n').filter((line) => line.startsWith('data:'))
           .map((line) => line.slice(5).replace(/^ /, '')).join('\n');
         buffer = buffer.slice(end + 2);
-        if (data && data !== '[DONE]' && pending === request) {
-          readEvent(request, stream, data);
+        if (data && data !== '[DONE]') {
+          window[TAP_KEY]?.onEvent?.(stream, data);
         }
       }
     }
   }
 
-  function readEvent(request, stream, data) {
+  function readEvent(stream, data) {
     let event;
     try {
       event = JSON.parse(data);
@@ -275,42 +274,70 @@
     if (!event || typeof event !== 'object') {
       return;
     }
-    if (event.type === 'input_message') {
-      // Liga o stream à mensagem enviada pela ponte; outro envio não é lido.
-      const parts = event.input_message?.content?.parts;
-      const text = Array.isArray(parts) ? parts.map(plain).join('') : '';
-      if (text.replace(/\r\n/g, '\n').trim() !== request.message) {
-        stream.foreign = true;
-        return;
+    // O estado do delta encoding é mantido mesmo sem pedido pendente.
+    let root = null;
+    if (typeof event.type !== 'string') {
+      if (Number.isInteger(event.c)) {
+        stream.channel = event.c;
       }
-      request.streamed = true;
-      request.turnExchangeId = event.input_message.metadata?.turn_exchange_id || request.turnExchangeId;
-      request.activitySeq++;
+      if ('message' in event) {
+        stream.roots.set(stream.channel, event);
+      } else {
+        // No delta encoding v1, campos omitidos repetem o caminho, a operação e
+        // o canal anteriores. Canais distintos mantêm árvores independentes.
+        stream.path = typeof event.p === 'string' ? event.p : stream.path;
+        stream.op = typeof event.o === 'string' ? event.o : stream.op;
+        applyDelta(stream, stream.path, stream.op, event.v);
+      }
+      root = stream.roots.get(stream.channel);
+    }
+    stream.conversationId = plain(event.conversation_id) || plain(root?.conversation_id) || stream.conversationId;
+
+    const request = pending;
+    if (!request || request.providerId !== 'chatgpt' || !request.submitted || conversationUrl() !== request.url) {
       return;
     }
-    if (request.streamed) {
-      // Qualquer evento posterior do mesmo SSE é atividade real do provedor,
-      // inclusive tool calls e markers que não geram texto visível.
-      request.activitySeq++;
-    }
-    if (typeof event.type === 'string') {
+    if (request.stream !== stream) {
+      // Até a mensagem enviada por steering aparecer, o progresso do turno em
+      // andamento na mesma conversa também é atividade do pedido.
+      if (!request.stream && (bindStream(request, stream, event, root) || stream.conversationId === request.conversationId)) {
+        request.activitySeq++;
+      }
       return;
     }
-    if (Number.isInteger(event.c)) {
-      stream.channel = event.c;
-    }
-    if ('message' in event) {
-      stream.roots.set(stream.channel, event);
-    } else {
-      // No delta encoding v1, campos omitidos repetem o caminho, a operação e
-      // o canal anteriores. Canais distintos mantêm árvores independentes.
-      stream.path = typeof event.p === 'string' ? event.p : stream.path;
-      stream.op = typeof event.o === 'string' ? event.o : stream.op;
-      applyDelta(stream, stream.path, stream.op, event.v);
-    }
-    const root = stream.roots.get(stream.channel);
+    // Qualquer evento posterior do mesmo SSE é atividade real do provedor,
+    // inclusive tool calls e markers que não geram texto visível.
+    request.activitySeq++;
     readThoughts(request, root);
     readAnswer(request, root);
+  }
+
+  // Liga o pedido ao SSE que traz a mensagem enviada pela ponte: o input de um
+  // turno novo ou, com steering, a mensagem do usuário no turno em andamento.
+  function bindStream(request, stream, event, root) {
+    let turn;
+    if (event.type === 'input_message') {
+      if (partsText(event.input_message?.content?.parts) !== request.message) {
+        return false;
+      }
+      turn = event.input_message.metadata?.turn_exchange_id;
+    } else {
+      const message = root?.message;
+      if (message?.author?.role !== 'user' || partsText(message.content?.parts) !== request.message ||
+        (stream.conversationId && stream.conversationId !== request.conversationId)) {
+        return false;
+      }
+      turn = message.metadata?.turn_exchange_id;
+      // O que o turno já produziu antes da mensagem pertence ao pedido anterior.
+      for (const previous of stream.roots.values()) {
+        if (previous?.message?.id) {
+          request.ignored.add(previous.message.id);
+        }
+      }
+    }
+    request.stream = stream;
+    request.turnExchangeId = turn || request.turnExchangeId;
+    return true;
   }
 
   function applyDelta(stream, path, op, value) {
@@ -350,20 +377,22 @@
     }
   }
 
-  function readThoughts(request, root) {
+  // Mensagem do assistente no turno ligado ao pedido, ou null.
+  function replyMessage(request, root) {
     const message = root?.message;
-    if (!message || typeof message !== 'object') {
-      return;
-    }
-    if (root.conversation_id && root.conversation_id !== request.conversationId) {
-      return;
+    if (!message || typeof message !== 'object' || message.author?.role !== 'assistant' || request.ignored.has(message.id) ||
+      (root.conversation_id && root.conversation_id !== request.conversationId)) {
+      return null;
     }
     const turn = message.metadata?.turn_exchange_id;
-    if (message.author?.role !== 'assistant' || message.content?.content_type !== 'thoughts' ||
-      (request.turnExchangeId && turn && turn !== request.turnExchangeId)) {
+    return request.turnExchangeId && turn && turn !== request.turnExchangeId ? null : message;
+  }
+
+  function readThoughts(request, root) {
+    const message = replyMessage(request, root);
+    if (message?.content?.content_type !== 'thoughts') {
       return;
     }
-    request.streamed = true;
     const thoughts = Array.isArray(message.content.thoughts) ? message.content.thoughts : [];
     thoughts.forEach((thought, index) => {
       // Cada etapa termina com o título no passado e sem texto: não a repete.
@@ -373,15 +402,8 @@
   }
 
   function readAnswer(request, root) {
-    const message = root?.message;
-    if (!message || typeof message !== 'object') {
-      return;
-    }
-    if (root.conversation_id && root.conversation_id !== request.conversationId) {
-      return;
-    }
-    const turn = message.metadata?.turn_exchange_id;
-    if (message.author?.role !== 'assistant' || (request.turnExchangeId && turn && turn !== request.turnExchangeId)) {
+    const message = replyMessage(request, root);
+    if (!message) {
       return;
     }
     const contentType = message.content?.content_type;
@@ -413,7 +435,6 @@
     request.answerMessages.set(key, text);
     request.answer += text.slice(previous.length);
     request.answerComplete ||= message.status === 'finished_successfully';
-    request.streamed = true;
   }
 
   function recordThought(request, key, thought, closing) {
@@ -450,9 +471,6 @@
       pending = null;
     }
     request.observer?.disconnect();
-    for (const reader of request.readers) {
-      reader.cancel().catch(() => {});
-    }
     if (conversationUrl() === request.url) {
       for (const button of request.openedThinking) {
         if (button.isConnected && (button.tagName === 'SUMMARY' ? button.parentElement.open : button.getAttribute('aria-expanded') === 'true')) {
@@ -700,12 +718,19 @@
     }
   }
 
+  // Remove do editor o texto que a ponte inseriu e não chegou a enviar.
+  function clearInserted(request) {
+    if (request.sendMode === 'editor' && !request.submitted && request.editor.isConnected && editorText(request.editor) === request.message) {
+      insertText(request.editor, '');
+    }
+  }
+
   async function begin({ id, providerId, message }) {
     const url = conversationUrl();
     if (!url) {
       return fail('no_active_chat', 'Abra uma conversa existente no provedor ativo.');
     }
-    if (pending || stopButton()) {
+    if (pending) {
       return fail('chat_busy', 'O chat ativo está ocupado.');
     }
     const editor = composer(providerId);
@@ -716,7 +741,10 @@
       return fail('composer_not_empty', 'Envie ou limpe o rascunho do chat antes de usar a ponte.');
     }
     const sender = directSender(editor, providerId);
-    if (sender?.isStreaming || sender?.isSubmitting || sender?.isStopping) {
+    // Com um turno em andamento, o ChatGPT aceita outra mensagem no mesmo turno
+    // (steering), como o botão Enviar da UI. Sem isso, o envio fica para depois.
+    const generating = Boolean(stopButton() || sender?.isStreaming);
+    if ((generating && !sender?.isSteeringEnabled) || sender?.isSubmitting || sender?.isStopping) {
       return fail('chat_busy', 'O chat ativo está ocupado.');
     }
     if (sender && ['attachments', 'mcpAppAttachments', 'commentAttachments', 'selectedTextAttachments']
@@ -734,7 +762,7 @@
       conversationId: location.pathname.match(/\/c\/([^/]+)\/?$/)?.[1],
       reasoning: '', reasoningBlocks: new Map(), reasoningNodes: new Map(), openedThinking: new Set(), thinkingOpenedAt: 0,
       answer: '', answerComplete: false, answerMessageId: null, answerMessages: new Map(),
-      streamed: false, activitySeq: 0, turnExchangeId: null, thoughts: new Map(), openThought: null, readers: new Set(),
+      stream: null, ignored: new Set(), activitySeq: 0, turnExchangeId: null, thoughts: new Map(), openThought: null,
       sendMode: sender ? 'direct' : 'editor',
       submitted: false, sawBusy: false, lastText: '', changedAt: Date.now()
     };
@@ -770,6 +798,7 @@
         }
         if (stopButton()) {
           release(request);
+          clearInserted(request);
           return fail('chat_busy', 'Uma geração começou no chat antes do envio.');
         }
         const button = sendButton(editor);
@@ -806,7 +835,7 @@
     }
     // O DOM só é lido quando o stream do ChatGPT não foi ligado ao pedido.
     const previousReasoning = request.reasoning;
-    const thinkingOpening = !request.streamed && captureReasoning(request, latestUser);
+    const thinkingOpening = !request.stream && captureReasoning(request, latestUser);
     if (request.reasoning !== previousReasoning) {
       request.activitySeq++;
     }
@@ -850,9 +879,7 @@
       if (pending?.id === id) {
         const request = pending;
         release(request);
-        if (request.sendMode === 'editor' && !request.submitted && request.editor.isConnected && editorText(request.editor) === request.message) {
-          insertText(request.editor, '');
-        }
+        clearInserted(request);
       }
     }
   };

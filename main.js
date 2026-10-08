@@ -1102,9 +1102,21 @@ async function relayActiveChat({ id, message, signal, onStart, onActivity, onDel
     const bridgeScript = debugMode ? readFileSync(APP_SERVER_SCRIPT_PATH, 'utf8') : APP_SERVER_SCRIPT;
     await runInjection(contents, debugMode ? `delete window.__chatClientAppServer;\n${bridgeScript}` : bridgeScript);
     signal.throwIfAborted();
-    const started = await contents.executeJavaScript(
-      `window.__chatClientAppServer.begin(${JSON.stringify({ id, providerId, message })})`, true
-    );
+    // Quando a UI não aceita mensagens durante o turno em andamento, o envio
+    // espera o chat liberar; o timeout de inatividade da ponte limita a espera.
+    let started;
+    for (;;) {
+      if (contents.isDestroyed()) {
+        throw new AppServerError('O chat foi fechado.', 409, 'chat_closed');
+      }
+      started = await contents.executeJavaScript(
+        `window.__chatClientAppServer.begin(${JSON.stringify({ id, providerId, message })})`, true
+      );
+      if (started?.error?.code !== 'chat_busy') {
+        break;
+      }
+      await wait(500, undefined, { signal });
+    }
     checkResult(started);
     signal.throwIfAborted();
     onStart();

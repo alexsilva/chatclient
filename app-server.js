@@ -12,10 +12,12 @@ const MODEL_ID = 'active-chat';
 const MAX_BODY_BYTES = 1024 * 1024;
 
 class AppServerError extends Error {
-  constructor(message, status = 500, code = 'bridge_error') {
+  // sent indica que a mensagem pode já ter chegado ao chat antes da falha.
+  constructor(message, status = 500, code = 'bridge_error', { sent = false } = {}) {
     super(message);
     this.status = status;
     this.code = code;
+    this.sent = sent;
   }
 }
 
@@ -68,12 +70,12 @@ function errorPayload(error) {
   } };
 }
 
-function sendJson(response, status, data) {
+function sendJson(response, status, data, headers = {}) {
   // Diagnostic metadata only; never store request bodies, tokens or response text.
   if (data?.error?.code) {
     response._bridgeErrorCode = String(data.error.code);
   }
-  response.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' });
+  response.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', ...headers });
   response.end(JSON.stringify(data));
 }
 
@@ -292,6 +294,7 @@ class AppServer {
     const created = Math.floor(Date.now() / 1000);
     const model = typeof body.model === 'string' && body.model ? body.model : MODEL_ID;
     let heartbeat = null;
+    let sent = false;
     let streamed = '';
     let reasoning = '';
     const event = (data) => response.write(`data: ${JSON.stringify(data)}\n\n`);
@@ -337,6 +340,7 @@ class AppServer {
         this.relay({
           id, message, signal: controller.signal,
           onStart: () => {
+            sent = true;
             // O envio ao provedor não comprova que a ponte conseguirá acompanhar
             // a resposta. Não finalize HTTP 200 prematuramente: falhas de poll
             // anteriores ao primeiro delta precisam chegar como HTTP 4xx/5xx
@@ -366,6 +370,7 @@ class AppServer {
         }),
         abortPromise
       ]);
+      sent = true;
       if (controller.signal.aborted || response.destroyed) {
         return;
       }
@@ -416,6 +421,11 @@ class AppServer {
           response._bridgeErrorCode = error.code || 'bridge_error';
           event(errorPayload(error));
           response.end('data: [DONE]\n\n');
+        } else if (sent || error.sent) {
+          // Repetir um pedido já enviado duplicaria a mensagem no chat. Clientes
+          // OpenAI-compatible repetem 408/409/5xx; 422 com x-should-retry: false
+          // torna a falha definitiva. O code original continua no corpo.
+          sendJson(response, 422, errorPayload(error), { 'x-should-retry': 'false' });
         } else {
           sendJson(response, error.status || 500, errorPayload(error));
         }

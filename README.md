@@ -95,8 +95,15 @@ Se o callback não estiver disponível, a ponte faz a digitação usando
 A API só confirma o envio após recibo de mensagem vinculada no DOM ou SSE;
 chamar o botão isoladamente não basta. Em erros ambíguos, ela falha
 com `send_unconfirmed` (HTTP 422, sem retry automático) **sem repetir
-a mensagem**. Uma resposta final identificada pelo SSE
+a mensagem**. Qualquer falha depois que a mensagem pode ter chegado ao
+chat (`chat_changed`, `chat_timeout`, `provider_error` etc.) também
+responde HTTP 422 com `x-should-retry: false`, mantendo o `code` original:
+clientes OpenAI-compatible repetem 408/409/5xx, e a repetição duplicaria
+a mensagem na conversa. Uma resposta final identificada pelo SSE
 pode ser retornada mesmo quando o ChatGPT virtualiza a bolha do usuário.
+Com o SSE vinculado, a bolha exibida não precisa ter o texto exato do
+pedido (o ChatGPT pode formatar o markdown); outra bolha nova depois dela
+continua sendo tratada como `chat_changed`.
 
 ## Desenvolvimento
 

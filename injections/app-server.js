@@ -1,7 +1,7 @@
 (() => {
   const API_KEY = '__chatClientAppServer';
   const TAP_KEY = '__chatClientAppServerTap';
-  const VERSION = 13;
+  const VERSION = 14;
   if (window[API_KEY]?.version === VERSION) {
     return;
   }
@@ -13,7 +13,9 @@
   const visible = (element) => Boolean(element &&
     (element.offsetWidth || element.offsetHeight || element.getClientRects().length));
   const textOf = (element) => (element?.innerText ?? element?.textContent ?? '').replace(/\r\n/g, '\n').trim();
-  const fail = (code, message) => ({ error: { code, message } });
+  // sent marca falhas em que a mensagem pode já ter chegado ao chat: o
+  // servidor as torna definitivas para que nenhum cliente repita o envio.
+  const fail = (code, message, sent = false) => ({ error: { code, message, sent } });
 
   function conversationUrl() {
     return /\/c\/[^/]+\/?$/.test(location.pathname) ? `${location.origin}${location.pathname}` : null;
@@ -92,6 +94,15 @@
 
   function userText(element) {
     return textOf(element.querySelector('[data-user-message-bubble]') || element);
+  }
+
+  // A bolha do usuário pode exibir o markdown já formatado: ênfases e crases
+  // somem, e tabs, quebras e espaços mudam. Só o texto restante é comparado.
+  const comparable = (text) => text.replace(/[\s*_`~#>]+/g, '');
+
+  function sameMessage(element, message) {
+    const shown = userText(element);
+    return shown === message || comparable(shown) === comparable(message);
   }
 
   const TURN_SELECTOR = '[data-turn-key], [data-content-search-turn-key], ' +
@@ -194,7 +205,7 @@
         return;
       }
       const latestUser = messages('user', request.providerId).at(-1);
-      if (!latestUser || request.users.has(messageKey(latestUser)) || userText(latestUser) !== request.message) {
+      if (!latestUser || request.users.has(messageKey(latestUser)) || !sameMessage(latestUser, request.message)) {
         return;
       }
       // A UI pode desmontar a atualização de atividade ao começar a resposta.
@@ -746,8 +757,7 @@
 
   function submittedUser(request) {
     const latest = messages('user', request.providerId).at(-1);
-    return Boolean(latest && !request.users.has(messageKey(latest)) &&
-      userText(latest) === request.message);
+    return Boolean(latest && !request.users.has(messageKey(latest)) && sameMessage(latest, request.message));
   }
 
   async function waitForSubmission(request, timeoutMs = 4500) {
@@ -807,7 +817,7 @@
         release(request);
         // Um click não prova que o backend aceitou. Não tenta novamente,
         // pois a UI pode ter enviado antes de atualizar o DOM.
-        return fail('send_unconfirmed', 'O chat não confirmou o recebimento da mensagem.');
+        return fail('send_unconfirmed', 'O chat não confirmou o recebimento da mensagem.', true);
       }
       await sleep(60);
     }
@@ -870,19 +880,19 @@
         });
         if (pending !== request || conversationUrl() !== url) {
           release(request);
-          return fail('chat_changed', 'O pedido foi cancelado ou a conversa mudou antes do envio.');
+          return fail('chat_changed', 'O pedido foi cancelado ou a conversa mudou antes do envio.', true);
         }
         if (accepted === false) {
           release(request);
           // Não tenta o botão após chamar o callback: pode já ter enviado.
-          return fail('send_unavailable', 'O provedor recusou o envio direto.');
+          return fail('send_unavailable', 'O provedor recusou o envio direto.', true);
         }
         // Mesmo quando devolve true, um callback interno não garante que o
         // backend recebeu a mensagem. Exige o recibo vinculado no DOM/SSE.
         // Retornos void/undefined também são válidos quando há esse recibo.
         if (!(await waitForSubmission(request, 8000))) {
           release(request);
-          return fail('send_unconfirmed', 'O provedor não confirmou o envio direto.');
+          return fail('send_unconfirmed', 'O provedor não confirmou o envio direto.', true);
         }
         return { ok: true, sendMode: 'direct' };
       }
@@ -891,7 +901,8 @@
       return { ok: true, sendMode: 'editor', needsNativeInput: true };
     } catch (error) {
       release(request);
-      return fail('send_unavailable', `Não foi possível enviar pelo ${request.sendMode === 'direct' ? 'callback do provedor' : 'campo do chat'}: ${error.message}`);
+      return fail('send_unavailable', `Não foi possível enviar pelo ${request.sendMode === 'direct' ? 'callback do provedor' : 'campo do chat'}: ${error.message}`,
+        request.submitted);
     }
   }
 
@@ -912,12 +923,14 @@
         activitySeq: request.activitySeq, done: true, sendMode: request.sendMode
       };
     }
-    const users = messages('user', request.providerId);
-    const latestUser = users.at(-1);
-    if (!latestUser || request.users.has(messageKey(latestUser))) {
+    const fresh = messages('user', request.providerId).filter((element) => !request.users.has(messageKey(element)));
+    const latestUser = fresh.at(-1);
+    if (!latestUser) {
       return { text: '', done: false, activitySeq: request.activitySeq };
     }
-    if (userText(latestUser) !== request.message) {
+    // O SSE vinculado já provou o envio do texto exato, e a bolha exibida pode
+    // diferir dele. Basta ela ser a única nova; sem SSE, o texto é a prova.
+    if ((!request.stream || fresh.length > 1) && !sameMessage(latestUser, request.message)) {
       return fail('chat_changed', 'Outra mensagem foi enviada no chat durante o pedido.');
     }
     // O DOM só é lido quando o stream do ChatGPT não foi ligado ao pedido.

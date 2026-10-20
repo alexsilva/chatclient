@@ -1109,10 +1109,11 @@ async function relayActiveChat({ id, message, signal, onStart, onActivity, onDel
     if (!result || result.error) {
       const code = result?.error?.code || 'bridge_unavailable';
       const status = code === 'provider_error' ? 502 :
-        // Um envio incerto NÃO pode ser repetido pelo cliente automaticamente.
-        code === 'send_unconfirmed' ? 422 :
         ['composer_unavailable', 'send_unavailable', 'bridge_unavailable'].includes(code) ? 503 : 409;
-      throw new AppServerError(result?.error?.message || 'A ponte do chat não está disponível.', status, code);
+      // Um envio incerto NÃO pode ser repetido pelo cliente automaticamente:
+      // o AppServer responde 422 sem retry quando a ponte marca sent.
+      throw new AppServerError(result?.error?.message || 'A ponte do chat não está disponível.', status, code,
+        { sent: Boolean(result?.error?.sent) });
     }
   };
   signal.addEventListener('abort', cancel, { once: true });

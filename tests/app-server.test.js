@@ -86,7 +86,7 @@ test('diagnóstico autenticado registra status HTTP sem armazenar prompts ou tok
   assert.equal(good.status, 200);
   await good.text();
   const failed = await request(prompt('FALHA-SIGILOSA'));
-  assert.equal(failed.status, 502);
+  assert.equal(failed.status, 422);
   await failed.text();
   const diag = await fetch(`${server.getState().baseUrl}/diagnostics`, {
     headers: { Authorization: 'Bearer test-key' }
@@ -96,7 +96,7 @@ test('diagnóstico autenticado registra status HTTP sem armazenar prompts ou tok
   assert.equal(payload.version, 1);
   const completions = payload.receipts.filter((entry) => entry.path === '/v1/chat/completions');
   assert.equal(completions.length, 2);
-  assert.deepEqual(completions.map((entry) => entry.status), [200, 502]);
+  assert.deepEqual(completions.map((entry) => entry.status), [200, 422]);
   assert.deepEqual(completions.map((entry) => entry.stream), [true, false]);
   assert.equal(completions[1].errorCode, 'provider_error');
   const serialized = JSON.stringify(payload);
@@ -223,6 +223,7 @@ test('propaga ausência de conversa e libera o servidor após a falha', async (t
   });
   const failed = await request(prompt());
   assert.equal(failed.status, 409);
+  assert.equal(failed.headers.get('x-should-retry'), null);
   assert.equal((await failed.json()).error.code, 'no_active_chat');
   assert.equal(server.getState().busy, false);
   assert.equal((await request(prompt())).status, 200);
@@ -318,25 +319,27 @@ test('informa porta ocupada, permite tentar novamente e trocar host/porta/chave'
   assert.equal(server.getState().running, false);
 });
 
-test('erro após envio mas antes do primeiro delta retorna HTTP 409, não SSE 200', async (t) => {
+test('erro após envio mas antes do primeiro delta retorna HTTP 422 sem retry, não SSE 200', async (t) => {
   const { request, server } = await setup(t, async ({ onStart }) => {
     onStart();
     throw new AppServerError('A conversa mudou', 409, 'chat_changed');
   });
   const response = await request({ ...prompt(), stream: true });
-  assert.equal(response.status, 409);
+  assert.equal(response.status, 422);
+  assert.equal(response.headers.get('x-should-retry'), 'false');
   assert.match(response.headers.get('Content-Type'), /application\/json/);
   assert.equal((await response.json()).error.code, 'chat_changed');
   assert.equal(server.getState().busy, false);
 });
 
-test('timeout após envio e sem primeiro delta conserva HTTP 504 classificável', async (t) => {
+test('timeout após envio e sem primeiro delta é definitivo e conserva o code', async (t) => {
   const { request, server } = await setup(t, async ({ onStart }) => {
     onStart();
     return new Promise(() => {});
   }, { timeoutMs: 35 });
   const response = await request({ ...prompt(), stream: true });
-  assert.equal(response.status, 504);
+  assert.equal(response.status, 422);
+  assert.equal(response.headers.get('x-should-retry'), 'false');
   assert.match(response.headers.get('Content-Type'), /application\/json/);
   assert.equal((await response.json()).error.code, 'chat_timeout');
   assert.equal(server.getState().busy, false);
@@ -355,4 +358,31 @@ test('falha após o primeiro delta SSE encerra sem falso sucesso', async (t) => 
   assert.match(text, /Texto parcial/);
   assert.doesNotMatch(text, /"finish_reason":"stop"/);
   assert.match(text, /data: \[DONE\]/);
+});
+
+test('falha marcada como possível envio é definitiva mesmo antes de onStart', async (t) => {
+  const { request } = await setup(t, async () => {
+    throw new AppServerError('O provedor recusou o envio direto.', 503, 'send_unavailable', { sent: true });
+  });
+  const response = await request(prompt());
+  assert.equal(response.status, 422);
+  assert.equal(response.headers.get('x-should-retry'), 'false');
+  assert.equal((await response.json()).error.code, 'send_unavailable');
+});
+
+test('falha antes do envio conserva o status transitório para nova tentativa', async (t) => {
+  const { request } = await setup(t, async () => {
+    throw new AppServerError('O botão de envio não ficou disponível.', 503, 'send_unavailable');
+  });
+  const response = await request(prompt());
+  assert.equal(response.status, 503);
+  assert.equal(response.headers.get('x-should-retry'), null);
+});
+
+test('resposta vazia depois do relay concluir também não é repetida', async (t) => {
+  const { request } = await setup(t, async () => ({ text: '  ' }));
+  const response = await request(prompt());
+  assert.equal(response.status, 422);
+  assert.equal(response.headers.get('x-should-retry'), 'false');
+  assert.equal((await response.json()).error.code, 'empty_response');
 });

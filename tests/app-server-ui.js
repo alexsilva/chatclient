@@ -52,13 +52,16 @@ window.submitMessage = (message, options = {}) => {
     // A página consome o próprio SSE; a ponte só pode ler uma cópia.
     window.pageStream = fetch('/backend-api/f/conversation', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ message: window.streamInput || message, conversation: location.pathname.split('/c/')[1], turn: 'turn-' + index })
+      body: JSON.stringify({ message: window.streamInput || message, conversation: location.pathname.split('/c/')[1], turn: 'turn-' + index,
+        delay: window.streamDelay })
     }).then((response) => response.text()).then((text) => { window.pageStreamText = text; });
   }
   if (!options.preserveDraft) { editor.replaceChildren(); }
   button.dataset.testid = 'stop-button';
   button.setAttribute('aria-label', 'Stop generating');
   button.textContent = 'Stop';
+  // Como no ChatGPT, a bolha pode exibir o markdown formatado em vez do texto enviado.
+  const shown = window.renderUser ? window.renderUser(message) : message;
   const user = document.createElement('div');
   user.dataset.messageAuthorRole = 'user';
   user.dataset.messageId = 'user-' + index;
@@ -67,7 +70,7 @@ window.submitMessage = (message, options = {}) => {
     user.className = 'message-bubble bg-surface-l1';
     user.style.whiteSpace = 'pre-wrap';
   }
-  user.textContent = message;
+  user.textContent = shown;
   document.getElementById('messages').appendChild(user);
   // Modela a virtualização da bolha no ChatGPT real: a resposta continua no SSE.
   if (window.hideSubmittedUser) { user.remove(); }
@@ -92,7 +95,7 @@ window.submitMessage = (message, options = {}) => {
     user.dataset.chatgptSearchMessageIds = 'user-' + index;
     const bubble = document.createElement('div');
     bubble.dataset.userMessageBubble = 'true';
-    bubble.textContent = message;
+    bubble.textContent = shown;
     const actions = document.createElement('span');
     actions.textContent = 'Ações da mensagem';
     user.replaceChildren(bubble, actions);
@@ -309,7 +312,7 @@ async function eventually(getter, timeoutMs = 10000) {
 
 // SSE no formato do ChatGPT (delta encoding v1): etapas de raciocínio em
 // mensagens `thoughts`, campos herdados, patch e o título final no passado.
-function thoughtStream({ message, conversation, turn }) {
+function thoughtStream({ message, conversation, turn, delay = 8 }) {
   const thought = (id, thoughts, turnId = turn) => ({
     message: { id, author: { role: 'assistant' }, content: { content_type: 'thoughts', thoughts }, metadata: { turn_exchange_id: turnId } },
     conversation_id: conversation
@@ -344,7 +347,7 @@ function thoughtStream({ message, conversation, turn }) {
     async start(controller) {
       for (let offset = 0; offset < bytes.length; offset += 37) {
         controller.enqueue(bytes.slice(offset, offset + 37));
-        await wait(8);
+        await wait(delay);
       }
       controller.close();
     }
@@ -476,6 +479,16 @@ app.whenReady().then(async () => {
   assert.equal(firstAnswer.choices[0].message.content, 'Resposta final: Mensagem nova\nSegunda linha');
   assert.deepEqual(await page('window.sentMessages'), ['Mensagem nova\nSegunda linha']);
 
+  // Sem SSE, a bolha exibida é a prova do envio. O markdown formatado nela
+  // (ênfases e crases removidas) ainda identifica a mesma mensagem.
+  const stripMarkdown = (text) => text.replace(/\*\*|`/g, '');
+  await page(`window.renderUser = ${stripMarkdown}; true;`);
+  response = await request('Texto com **negrito** e `código`');
+  const formattedDom = await response.json();
+  assert.equal(response.status, 200, JSON.stringify(formattedDom));
+  assert.equal(formattedDom.choices[0].message.content, 'Resposta final: Texto com **negrito** e `código`');
+  await page('window.renderUser = null;');
+
   response = await request('Teste SSE', { stream: true });
   const events = (await response.text()).split('\n\n').filter((line) => line.startsWith('data: '))
     .map((line) => line.slice(6)).filter((line) => line !== '[DONE]').map(JSON.parse);
@@ -518,7 +531,19 @@ app.whenReady().then(async () => {
   await eventually(() => page('window.sentMessages.includes("Troca de conversa")'));
   await page('history.pushState({}, "", "/c/outra-conversa");');
   response = await changed;
-  assert.equal(response.status, 409);
+  // A mensagem já foi enviada: repetir o pedido a duplicaria no chat.
+  assert.equal(response.status, 422);
+  assert.equal(response.headers.get('x-should-retry'), 'false');
+  assert.equal((await response.json()).error.code, 'chat_changed');
+  await eventually(() => page('document.getElementById("composer-submit-button").dataset.testid === "send-button"'));
+
+  // Outra mensagem humana depois da enviada pela ponte aborta o pedido sem retry.
+  const interjected = request('Pedido com mensagem humana no meio');
+  await eventually(() => page('window.sentMessages.includes("Pedido com mensagem humana no meio")'));
+  await page('window.addMessage("user", "humana-dom", "Mensagem humana no meio");');
+  response = await interjected;
+  assert.equal(response.status, 422);
+  assert.equal(response.headers.get('x-should-retry'), 'false');
   assert.equal((await response.json()).error.code, 'chat_changed');
   await eventually(() => page('document.getElementById("composer-submit-button").dataset.testid === "send-button"'));
 
@@ -733,6 +758,31 @@ app.whenReady().then(async () => {
   assert.equal(noBubble.map((part) => part.choices[0].delta.content || '').join(''),
     'Resposta final: Resposta sem bolha no DOM');
   assert.equal(noBubble.at(-1).choices[0].finish_reason, 'stop');
+
+  // Regressão real: o SSE da página já confirmou o texto exato, mas a bolha
+  // exibe o markdown formatado e difere do enviado. Não é chat_changed.
+  const renderFormatted = (text) => 'Você disse:\n' + text.replace(/[*`]/g, '');
+  await page(`window.hideSubmittedUser = false; window.streamDelay = 40; window.renderUser = ${renderFormatted}; true;`);
+  const formatted = 'Contexto com **negrito**, `código`,\ttab e <tag>\n```bash\nls\n```';
+  response = await request(formatted);
+  const formattedStream = await response.json();
+  assert.equal(response.status, 200, JSON.stringify(formattedStream));
+  assert.equal(formattedStream.choices[0].message.content, 'Resposta final: ' + formatted);
+  assert.equal(await page(`window.sentMessages.filter(text => text === ${JSON.stringify(formatted)}).length`), 1);
+
+  // Com o SSE ligado, outra bolha nova depois da enviada continua sendo
+  // outra mensagem no chat: falha definitiva, sem reenviar o pedido.
+  await page('window.pageStreamText = null;');
+  const interruptedStream = request('Pedido com SSE e mensagem humana');
+  await eventually(() => page('window.sentMessages.includes("Pedido com SSE e mensagem humana")'));
+  await page('window.addMessage("user", "humana-sse", "Outra mensagem humana");');
+  response = await interruptedStream;
+  assert.equal(response.status, 422);
+  assert.equal(response.headers.get('x-should-retry'), 'false');
+  assert.equal((await response.json()).error.code, 'chat_changed');
+  assert.equal(await page('window.sentMessages.filter(text => text === "Pedido com SSE e mensagem humana").length'), 1);
+  await eventually(() => page('window.pageStreamText?.endsWith("data: [DONE]\\n\\n")'));
+  await page('window.streamDelay = null; window.renderUser = null;');
   await page('window.hideSubmittedUser = false; window.streamThoughts = false; window.streamInput = null; window.responseDelay = 150;');
 
   // Steering: com um turno em andamento, o ChatGPT aceita outra mensagem no

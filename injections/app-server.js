@@ -1,7 +1,7 @@
 (() => {
   const API_KEY = '__chatClientAppServer';
   const TAP_KEY = '__chatClientAppServerTap';
-  const VERSION = 11;
+  const VERSION = 12;
   if (window[API_KEY]?.version === VERSION) {
     return;
   }
@@ -57,6 +57,7 @@
     return [...scope.querySelectorAll('button')].find((button) => visible(button) &&
       button !== stop && button.dataset.testid !== 'stop-button' && (
         button.dataset.testid === 'send-button' || button.id === 'composer-submit-button' ||
+        (button.type === 'submit' && button.closest('form') === editor.closest('form')) ||
         /^(send(?: message| prompt)?|submit|enviar(?: mensagem| prompt)?)$/i.test(label(button))
       ));
   }
@@ -209,7 +210,8 @@
   // (steering) chega no SSE que a página já tinha aberto.
   const STREAM_PATH = /^\/backend-api\/(?:f\/)?conversation(?:\/|$)/;
   const plain = (value) => (typeof value === 'string' ? value : '');
-  const partsText = (parts) => (Array.isArray(parts) ? parts.map(plain).join('') : '').replace(/\r\n/g, '\n').trim();
+  const partsText = (parts) => (Array.isArray(parts) ?
+    parts.map((part) => plain(part) || plain(part?.text)).join('') : '').replace(/\r\n/g, '\n').trim();
 
   function tapStream(response) {
     if (!response.body || !(response.headers.get('content-type') || '').includes('text/event-stream') ||
@@ -315,6 +317,10 @@
   // Liga o pedido ao SSE que traz a mensagem enviada pela ponte: o input de um
   // turno novo ou, com steering, a mensagem do usuário no turno em andamento.
   function bindStream(request, stream, event, root) {
+    // Nunca vincular um SSE de outra conversa apenas porque o texto é igual.
+    if (stream.conversationId && stream.conversationId !== request.conversationId) {
+      return false;
+    }
     let turn;
     if (event.type === 'input_message') {
       if (partsText(event.input_message?.content?.parts) !== request.message) {
@@ -429,12 +435,16 @@
     }
     request.answerMessageId ||= key;
     const previous = request.answerMessages.get(key) || '';
+    // O status final pode chegar num delta sem mudança no texto. Não o
+    // descarte ao comparar strings: ele é a confirmação do stream nativo.
+    if (message.status === 'finished_successfully' && text) {
+      request.answerComplete = true;
+    }
     if (!text || text === previous || !text.startsWith(previous)) {
       return;
     }
     request.answerMessages.set(key, text);
     request.answer += text.slice(previous.length);
-    request.answerComplete ||= message.status === 'finished_successfully';
   }
 
   function recordThought(request, key, thought, closing) {
@@ -718,11 +728,85 @@
     }
   }
 
-  // Remove do editor o texto que a ponte inseriu e não chegou a enviar.
+  // Remove só o rascunho injetado pela ponte que NÃO foi submetido. Nunca
+  // sobrescreve alterações humanas nem apaga texto de um envio incerto.
   function clearInserted(request) {
-    if (request.sendMode === 'editor' && !request.submitted && request.editor.isConnected && editorText(request.editor) === request.message) {
+    if (request.sendMode === 'editor' && !request.submitted &&
+        request.editor.isConnected && editorText(request.editor) === request.message) {
       insertText(request.editor, '');
     }
+  }
+
+  function submittedUser(request) {
+    const latest = messages('user', request.providerId).at(-1);
+    return Boolean(latest && !request.users.has(messageKey(latest)) &&
+      userText(latest) === request.message);
+  }
+
+  async function waitForSubmission(request, timeoutMs = 4500) {
+    const deadline = Date.now() + timeoutMs;
+    while (pending === request && conversationUrl() === request.url) {
+      // O SSE só é vinculado quando contém o texto exato deste pedido.
+      if (request.stream || submittedUser(request)) {
+        return true;
+      }
+      if (Date.now() >= deadline) {
+        break;
+      }
+      await sleep(75);
+    }
+    return false;
+  }
+
+  // O fallback é digitado pelo Electron com WebContents.insertText: gera
+  // eventos de edição do Chromium, em vez de alterar apenas o DOM/React.
+  function prepareEditor(id) {
+    const request = pending;
+    if (!request || request.id !== id || request.sendMode !== 'editor' ||
+        request.submitted || conversationUrl() !== request.url ||
+        !request.editor.isConnected || editorText(request.editor)) {
+      return false;
+    }
+    request.editor.focus();
+    return document.activeElement === request.editor;
+  }
+
+  async function completeEditor(id) {
+    const request = pending;
+    if (!request || request.id !== id || request.sendMode !== 'editor' ||
+        conversationUrl() !== request.url || !request.editor.isConnected ||
+        editorText(request.editor) !== request.message) {
+      return fail('send_unavailable', 'O conteúdo do campo mudou antes do envio.');
+    }
+    const deadline = Date.now() + 3000;
+    while (pending === request && Date.now() < deadline) {
+      if (conversationUrl() !== request.url || !request.editor.isConnected ||
+          editorText(request.editor) !== request.message) {
+        release(request);
+        return fail('chat_changed', 'O campo ou a conversa mudou antes do envio.');
+      }
+      if (stopButton() && !request.stream) {
+        release(request);
+        clearInserted(request);
+        return fail('chat_busy', 'Outra geração começou antes do envio.');
+      }
+      const button = sendButton(request.editor);
+      if (button && !button.disabled && button.getAttribute('aria-disabled') !== 'true') {
+        request.submitted = true;
+        button.click();
+        if (await waitForSubmission(request)) {
+          return { ok: true, sendMode: 'editor' };
+        }
+        release(request);
+        // Um click não prova que o backend aceitou. Não tenta novamente,
+        // pois a UI pode ter enviado antes de atualizar o DOM.
+        return fail('send_unconfirmed', 'O chat não confirmou o recebimento da mensagem.');
+      }
+      await sleep(60);
+    }
+    release(request);
+    clearInserted(request);
+    return fail('send_unavailable', 'O botão de envio não ficou disponível após digitar.');
   }
 
   async function begin({ id, providerId, message }) {
@@ -781,36 +865,23 @@
           release(request);
           return fail('chat_changed', 'O pedido foi cancelado ou a conversa mudou antes do envio.');
         }
-        if (accepted !== true) {
+        if (accepted === false) {
           release(request);
-          // Não tenta o botão após chamar o callback: uma falha de contrato
-          // pode ter ocorrido depois de o provedor já aceitar a mensagem.
-          return fail('send_unavailable', 'O provedor não confirmou o envio direto da mensagem.');
+          // Não tenta o botão após chamar o callback: pode já ter enviado.
+          return fail('send_unavailable', 'O provedor recusou o envio direto.');
+        }
+        // Mesmo quando devolve true, um callback interno não garante que o
+        // backend recebeu a mensagem. Exige o recibo vinculado no DOM/SSE.
+        // Retornos void/undefined também são válidos quando há esse recibo.
+        if (!(await waitForSubmission(request, 8000))) {
+          release(request);
+          return fail('send_unconfirmed', 'O provedor não confirmou o envio direto.');
         }
         return { ok: true, sendMode: 'direct' };
       }
-      insertText(editor, message);
-      const deadline = Date.now() + 3000;
-      while (pending === request && Date.now() < deadline) {
-        if (conversationUrl() !== url) {
-          release(request);
-          return fail('chat_changed', 'A conversa ativa mudou antes do envio.');
-        }
-        if (stopButton()) {
-          release(request);
-          clearInserted(request);
-          return fail('chat_busy', 'Uma geração começou no chat antes do envio.');
-        }
-        const button = sendButton(editor);
-        if (button && !button.disabled && button.getAttribute('aria-disabled') !== 'true' && editorText(editor) === request.message) {
-          request.submitted = true;
-          button.click();
-          return { ok: true, sendMode: 'editor' };
-        }
-        await sleep(50);
-      }
-      release(request);
-      return fail('send_unavailable', 'Não foi possível enviar a mensagem pelo botão do chat.');
+      // Não edita o DOM aqui. O processo principal prepara o foco e injeta
+      // texto via Chromium para manter o editor controlado pelo provedor.
+      return { ok: true, sendMode: 'editor', needsNativeInput: true };
     } catch (error) {
       release(request);
       return fail('send_unavailable', `Não foi possível enviar pelo ${request.sendMode === 'direct' ? 'callback do provedor' : 'campo do chat'}: ${error.message}`);
@@ -825,10 +896,19 @@
     if (conversationUrl() !== request.url) {
       return fail('chat_changed', 'A conversa mudou enquanto a resposta era aguardada.');
     }
+    // O SSE do turno autenticado é suficiente mesmo se a UI virtualizar a
+    // bolha do usuário ou atrasar os botões de conclusão do DOM.
+    if (request.stream && request.answerComplete && request.answer) {
+      return {
+        text: request.answer, reasoning: request.reasoning,
+        streamedText: request.answer, streamedComplete: true,
+        activitySeq: request.activitySeq, done: true, sendMode: request.sendMode
+      };
+    }
     const users = messages('user', request.providerId);
     const latestUser = users.at(-1);
     if (!latestUser || request.users.has(messageKey(latestUser))) {
-      return { text: '', done: false };
+      return { text: '', done: false, activitySeq: request.activitySeq };
     }
     if (userText(latestUser) !== request.message) {
       return fail('chat_changed', 'Outra mensagem foi enviada no chat durante o pedido.');
@@ -874,6 +954,8 @@
   window[API_KEY] = {
     version: VERSION,
     begin,
+    prepareEditor,
+    completeEditor,
     poll,
     cancel(id) {
       if (pending?.id === id) {

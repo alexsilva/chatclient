@@ -67,6 +67,35 @@ curl http://127.0.0.1:8787/v1/chat/completions \
   -d '{"model":"active-chat","messages":[{"role":"user","content":"Olá"}]}'
 ```
 
+## Múltiplas instâncias locais
+
+O ChatClient 1.0.5 isola **as configurações por processo** para permitir
+que Quimera conecte várias janelas independentes sem sobrescrever
+a porta/chave do servidor de outra janela. Um lease atômico reserva um slot:
+a primeira instância usa a porta inicial `8787`, a segunda `8788`
+e a terceira `8789` (até oito janelas); alterações de porta feitas na
+interface são preservadas para aquele slot. É possível fixar a identidade
+ao lançar com `--chatclient-instance=0`, `=1`, `=2`, etc.
+Um slot já ocupado é recusado, em vez de compartilhar a mesma configuração.
+
+As preferências são gravadas em
+`~/.config/chatclient/session-state.instance-N.json`, e as antigas
+`session-state.json` são **apenas lidas** na migração inicial, preservando
+a chave configurada. O diretório Chromium e a sessão autenticada não são
+apagados, movidos nem copiados. Cada processo possui um servidor HTTP
+independente, e as portas devem coincidir com a configuração Quimera
+de cada variante. Os processos já abertos com versões antigas continuam
+com a lógica antiga até serem reiniciados.
+
+O envio ao ChatGPT primeiro utiliza o callback nativo quando reconhecido.
+Se o callback não estiver disponível, a ponte faz a digitação usando
+`WebContents.insertText` do Electron, em vez de editar o HTML do campo.
+A API só confirma o envio após recibo de mensagem vinculada no DOM ou SSE;
+chamar o botão isoladamente não basta. Em erros ambíguos, ela falha
+com `send_unconfirmed` (HTTP 422, sem retry automático) **sem repetir
+a mensagem**. Uma resposta final identificada pelo SSE
+pode ser retornada mesmo quando o ChatGPT virtualiza a bolha do usuário.
+
 ## Desenvolvimento
 
 ### Pré-requisitos

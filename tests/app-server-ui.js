@@ -69,6 +69,8 @@ window.submitMessage = (message, options = {}) => {
   }
   user.textContent = message;
   document.getElementById('messages').appendChild(user);
+  // Modela a virtualização da bolha no ChatGPT real: a resposta continua no SSE.
+  if (window.hideSubmittedUser) { user.remove(); }
   const turn = document.createElement('article');
   turn.dataset.testid = 'conversation-turn-' + (index + 1);
   let turnContainer = turn;
@@ -437,7 +439,8 @@ app.whenReady().then(async () => {
   });
   await eventually(() => page('Boolean(window.__chatClientAppServer && window.sentMessages)'));
   const restored = await shell('window.chatClient.getState()');
-  assert.equal(restored.appServer.port, 8791);
+  // Nova instância migra só a chave, não reaproveita a porta de outra janela.
+  assert.equal(restored.appServer.port, 8787);
   assert.equal(restored.appServer.key, 'persisted-key');
   assert.equal(restored.restoreWorkspaceEnabled, false);
   const port = await freePort();
@@ -649,6 +652,26 @@ app.whenReady().then(async () => {
   assert.equal(await page('window.sentMessages.filter(text => text === "Falha depois de aceitar").length'), 1);
   assert.equal(await page('window.inputEvents'), 0);
   await page('window.directError = false; window.responseDelay = 150;');
+  // A UI pode aceitar o envio mesmo que seu callback devolva undefined/void.
+  await page(`window.previousNativeSubmit = window.directProps.onSubmit;
+    window.directProps.onSubmit = async (...args) => { await window.previousNativeSubmit(...args); }; true;`);
+  response = await request('Enviado sem retorno booleano');
+  assert.equal(response.status, 200);
+  assert.equal((await response.json()).choices[0].message.content, 'Resposta final: Enviado sem retorno booleano');
+  assert.equal(await page('window.sentMessages.filter(text => text === "Enviado sem retorno booleano").length'), 1);
+  // Sem confirmação no DOM/SSE, undefined NÃO pode ser considerado sucesso.
+  await page('window.directProps.onSubmit = async () => undefined; true;');
+  response = await request('Não enviar duas vezes');
+  assert.equal(response.status, 422);
+  assert.equal((await response.json()).error.code, 'send_unconfirmed');
+  assert.equal(await page('window.sentMessages.includes("Não enviar duas vezes")'), false);
+  // Retornar true sem que uma mensagem apareça também é falso positivo.
+  await page('window.directProps.onSubmit = async () => true; true;');
+  response = await request('Aceite falso do callback');
+  assert.equal(response.status, 422);
+  assert.equal((await response.json()).error.code, 'send_unconfirmed');
+  assert.equal(await page('window.sentMessages.includes("Aceite falso do callback")'), false);
+  await page('window.directProps.onSubmit = window.previousNativeSubmit; delete window.previousNativeSubmit;');
   const longMessage = 'Linha de teste sem passar pelo editor.\n'.repeat(2048).trim();
   response = await request(longMessage);
   assert.equal(response.status, 200);
@@ -689,7 +712,15 @@ app.whenReady().then(async () => {
   await page('window.streamInput = "Mensagem de outro envio";');
   response = await request('Stream de outra mensagem');
   assert.equal((await response.json()).choices[0].message.reasoning_content, 'Pensamento que não faz parte da resposta');
-  await page('window.streamThoughts = false; window.streamInput = null; window.responseDelay = 150;');
+  // Resposta SSE final continua válida quando o DOM virtualiza a bolha user.
+  await page('window.streamInput = null; window.hideSubmittedUser = true;');
+  response = await request('Resposta sem bolha no DOM', { stream: true });
+  const noBubble = (await response.text()).split('\n\n').filter((part) => part.startsWith('data: '))
+    .map((part) => part.slice(6)).filter((part) => part !== '[DONE]').map(JSON.parse);
+  assert.equal(noBubble.map((part) => part.choices[0].delta.content || '').join(''),
+    'Resposta final: Resposta sem bolha no DOM');
+  assert.equal(noBubble.at(-1).choices[0].finish_reason, 'stop');
+  await page('window.hideSubmittedUser = false; window.streamThoughts = false; window.streamInput = null; window.responseDelay = 150;');
 
   // Steering: com um turno em andamento, o ChatGPT aceita outra mensagem no
   // mesmo turno. A resposta chega pelo SSE que a página abriu antes do pedido.
@@ -817,6 +848,36 @@ app.whenReady().then(async () => {
   assert.equal(response.status, 200);
   assert.equal((await response.json()).choices[0].message.content, 'Resposta final: Fallback pelo editor');
   assert.ok(await page('window.inputEvents > 0'));
+  // O botão novo pode não ter label nem testid, mas ainda é submit do form.
+  await page(`(() => {
+    const form = document.querySelector('form');
+    form.addEventListener('submit', (event) => event.preventDefault());
+    const button = form.querySelector('button');
+    button.type = 'submit'; button.removeAttribute('id');
+    button.removeAttribute('aria-label'); delete button.dataset.testid;
+  })()`);
+  response = await request('Enviar com botão sem rótulo');
+  assert.equal(response.status, 200);
+  assert.equal((await response.json()).choices[0].message.content, 'Resposta final: Enviar com botão sem rótulo');
+  await page(`(() => {
+    const button = document.querySelector('form button');
+    button.type = 'button'; button.setAttribute('aria-label', 'Enviar mensagem');
+  })()`);
+  // Quando o estado do React bloqueia o botão, NÃO confirma um envio fantasma.
+  await page(`(() => {
+    const editor = document.querySelector('form [contenteditable]');
+    window.blockNativeSend = () => { document.querySelector('form button').disabled = true; };
+    editor.addEventListener('input', window.blockNativeSend);
+  })()`);
+  response = await request('Estado do React não habilitou envio');
+  assert.equal(response.status, 503);
+  assert.equal((await response.json()).error.code, 'send_unavailable');
+  assert.equal(await page('document.querySelector("form [contenteditable]").innerText.trim()'), '');
+  assert.equal(await page('window.sentMessages.includes("Estado do React não habilitou envio")'), false);
+  await page(`(() => {
+    document.querySelector('form [contenteditable]').removeEventListener('input', window.blockNativeSend);
+    delete window.blockNativeSend;
+  })()`);
 
   // O modo atual define o alvo sem criar uma conversa para a API.
   await shell('window.chatClient.setMode("grok")');
@@ -858,8 +919,10 @@ app.whenReady().then(async () => {
   `);
   assert.equal(await shell('document.getElementById("serverHostInput").value'), 'localhost');
   await wait(350);
-  const saved = JSON.parse(readFileSync(join(profile, 'session-state.json'), 'utf8'));
+  const saved = JSON.parse(readFileSync(join(profile, 'session-state.instance-0.json'), 'utf8'));
   assert.deepEqual(saved.appServer, { enabled: true, host: '127.0.0.1', port, key: 'ui-test-key' });
+  assert.deepEqual(JSON.parse(readFileSync(join(profile, 'session-state.json'), 'utf8')).appServer,
+    { enabled: false, host: '127.0.0.1', port: 8791, key: 'persisted-key' });
   assert.equal(saved.restoreWorkspaceEnabled, false);
   await shell('document.getElementById("serverForm").scrollIntoView({ block: "center" });');
   const layout = await shell(`(() => {

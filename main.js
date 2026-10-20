@@ -7,11 +7,13 @@ const {
   readFileSync,
   writeFileSync,
   renameSync,
-  mkdirSync
+  mkdirSync,
+  existsSync
 } = require('node:fs');
 const { join } = require('node:path');
 const { setTimeout: wait } = require('node:timers/promises');
 const { AppServer, AppServerError, DEFAULT_SERVER_CONFIG, normalizeServerConfig } = require('./app-server');
+const { reserveInstanceState, preferredInstance } = require('./instance-state');
 
 // Modo debug: ativo apenas quando o ChatClient roda a partir do código-fonte.
 // Instalado (deb/AppImage) `app.isPackaged` é true, o modo fica desligado e o
@@ -145,6 +147,7 @@ let chromeHoverActive = false;
 let railLastIntentAt = 0;
 let toolbarLastIntentAt = 0;
 let sessionStatePath = null;
+let instanceLease = null;
 let sessionSaveTimer = null;
 let restoredWindowState = null;
 let restoreWorkspaceEnabled = true;
@@ -156,10 +159,21 @@ let providerUrls = Object.fromEntries(
 );
 
 function loadSessionState() {
-  sessionStatePath = join(app.getPath('userData'), 'session-state.json');
-
+  // Isola configuração HTTP, porta, janela e URL por processo sem separar os
+  // cookies do Chromium. Slots livres são alocados atomicamente; é possível
+  // fixar a identidade de uma janela com --chatclient-instance=N.
+  instanceLease = reserveInstanceState(app.getPath('userData'), {
+    slot: preferredInstance(process.argv)
+  });
+  sessionStatePath = instanceLease.statePath;
+  const hasOwnState = existsSync(sessionStatePath);
+  restoredServerConfig.port = instanceLease.defaultPort;
   try {
-    const saved = JSON.parse(readFileSync(sessionStatePath, 'utf8'));
+    // Migração somente de leitura: copia preferências/chave da configuração
+    // legada, mas não reaproveita sua porta em todas as instâncias.
+    const saved = JSON.parse(readFileSync(
+      hasOwnState ? sessionStatePath : instanceLease.legacyPath, 'utf8'
+    ));
 
     if (typeof saved.restoreWorkspaceEnabled === 'boolean') {
       restoreWorkspaceEnabled = saved.restoreWorkspaceEnabled;
@@ -189,7 +203,10 @@ function loadSessionState() {
 
     if (saved.appServer && typeof saved.appServer === 'object') {
       try {
-        restoredServerConfig = normalizeServerConfig({ ...DEFAULT_SERVER_CONFIG, ...saved.appServer });
+        restoredServerConfig = normalizeServerConfig({
+          ...DEFAULT_SERVER_CONFIG, ...saved.appServer,
+          ...(!hasOwnState ? { port: instanceLease.defaultPort } : {})
+        });
       } catch (error) {
         log.warn('Configuração do servidor inválida:', error.message);
       }
@@ -269,7 +286,9 @@ function saveSessionStateNow() {
   try {
     mkdirSync(app.getPath('userData'), { recursive: true });
     const tempPath = `${sessionStatePath}.tmp`;
-    writeFileSync(tempPath, `${JSON.stringify(buildSessionState(), null, 2)}\n`, 'utf8');
+    writeFileSync(tempPath, `${JSON.stringify(buildSessionState(), null, 2)}\n`, {
+      encoding: 'utf8', mode: 0o600
+    });
     renameSync(tempPath, sessionStatePath);
   } catch (error) {
     log.warn('Não foi possível salvar a sessão:', error.message);
@@ -1090,6 +1109,8 @@ async function relayActiveChat({ id, message, signal, onStart, onActivity, onDel
     if (!result || result.error) {
       const code = result?.error?.code || 'bridge_unavailable';
       const status = code === 'provider_error' ? 502 :
+        // Um envio incerto NÃO pode ser repetido pelo cliente automaticamente.
+        code === 'send_unconfirmed' ? 422 :
         ['composer_unavailable', 'send_unavailable', 'bridge_unavailable'].includes(code) ? 503 : 409;
       throw new AppServerError(result?.error?.message || 'A ponte do chat não está disponível.', status, code);
     }
@@ -1118,6 +1139,24 @@ async function relayActiveChat({ id, message, signal, onStart, onActivity, onDel
       await wait(500, undefined, { signal });
     }
     checkResult(started);
+    if (started.needsNativeInput) {
+      // A UI atual usa um editor controlado por React. Alterar innerHTML ou
+      // despachar um InputEvent sintético pode exibir texto sem atualizá-lo.
+      // O Electron entrega edição nativa ao WebContents da conversa vinculada.
+      const ready = await contents.executeJavaScript(
+        `window.__chatClientAppServer.prepareEditor(${requestId})`, true
+      );
+      if (!ready) {
+        throw new AppServerError('O editor mudou antes da digitação.', 409, 'composer_changed');
+      }
+      signal.throwIfAborted();
+      await contents.insertText(message);
+      signal.throwIfAborted();
+      started = await contents.executeJavaScript(
+        `window.__chatClientAppServer.completeEditor(${requestId})`, true
+      );
+      checkResult(started);
+    }
     signal.throwIfAborted();
     onStart();
     let reasoning = '';
@@ -1679,4 +1718,6 @@ app.on('window-all-closed', () => {
 
 app.on('before-quit', () => {
   appServer.stop().catch(() => {});
+  instanceLease?.release();
+  instanceLease = null;
 });

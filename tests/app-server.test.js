@@ -287,14 +287,41 @@ test('informa porta ocupada, permite tentar novamente e trocar host/porta/chave'
   assert.equal(server.getState().running, false);
 });
 
-test('falha durante SSE é um erro e nunca uma resposta inventada', async (t) => {
-  const { request } = await setup(t, async ({ onStart }) => {
+test('erro após envio mas antes do primeiro delta retorna HTTP 409, não SSE 200', async (t) => {
+  const { request, server } = await setup(t, async ({ onStart }) => {
     onStart();
     throw new AppServerError('A conversa mudou', 409, 'chat_changed');
   });
   const response = await request({ ...prompt(), stream: true });
+  assert.equal(response.status, 409);
+  assert.match(response.headers.get('Content-Type'), /application\/json/);
+  assert.equal((await response.json()).error.code, 'chat_changed');
+  assert.equal(server.getState().busy, false);
+});
+
+test('timeout após envio e sem primeiro delta conserva HTTP 504 classificável', async (t) => {
+  const { request, server } = await setup(t, async ({ onStart }) => {
+    onStart();
+    return new Promise(() => {});
+  }, { timeoutMs: 35 });
+  const response = await request({ ...prompt(), stream: true });
+  assert.equal(response.status, 504);
+  assert.match(response.headers.get('Content-Type'), /application\/json/);
+  assert.equal((await response.json()).error.code, 'chat_timeout');
+  assert.equal(server.getState().busy, false);
+});
+
+test('falha após o primeiro delta SSE encerra sem falso sucesso', async (t) => {
+  const { request } = await setup(t, async ({ onStart, onDelta }) => {
+    onStart();
+    onDelta('Texto parcial.');
+    throw new AppServerError('A conversa mudou', 409, 'chat_changed');
+  });
+  const response = await request({ ...prompt(), stream: true });
+  assert.equal(response.status, 200); // Após cabeçalhos, somente SSE pode sinalizar erro.
   const text = await response.text();
   assert.match(text, /"code":"chat_changed"/);
+  assert.match(text, /Texto parcial/);
   assert.doesNotMatch(text, /"finish_reason":"stop"/);
   assert.match(text, /data: \[DONE\]/);
 });

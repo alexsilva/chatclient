@@ -807,13 +807,18 @@ app.whenReady().then(async () => {
     oldStatus.textContent = 'ChatGPT is responding';
     document.querySelector('article').append(oldStatus);
   `);
-  response = await request('Indicador sem resumo', { stream: true });
+  // O HTTP 200 somente começa após o primeiro delta verificável. Inspecione
+  // o indicador enquanto a requisição ainda está pendente: a UI não depende
+  // de um SSE 200 antecipado, que ocultaria falhas de captura iniciais.
+  const statusRequest = request('Indicador sem resumo', { stream: true });
+  await eventually(() => page('Boolean(window.lastGenerationStatus?.isConnected)'));
+  assert.equal(await page('window.lastGenerationStatus.isConnected'), true);
+  response = await statusRequest;
   const statusReader = response.body.getReader();
   const firstStatusChunk = await statusReader.read();
   assert.equal(firstStatusChunk.done, false);
   let statusStream = decoder.decode(firstStatusChunk.value, { stream: true });
-  assert.equal(await page('window.lastGenerationStatus.isConnected'), true);
-  assert.doesNotMatch(statusStream, /Resposta final:/);
+  assert.equal(response.status, 200);
   assert.doesNotMatch(statusStream, /reasoning_content/);
   for (;;) {
     const { value, done } = await statusReader.read();

@@ -286,8 +286,12 @@ class AppServer {
         this.relay({
           id, message, signal: controller.signal,
           onStart: () => {
+            // O envio ao provedor não comprova que a ponte conseguirá acompanhar
+            // a resposta. Não finalize HTTP 200 prematuramente: falhas de poll
+            // anteriores ao primeiro delta precisam chegar como HTTP 4xx/5xx
+            // com JSON, para clientes OpenAI-compatible classificarem o erro.
+            // O SSE começa no primeiro delta (texto/thinking) ou na conclusão.
             refreshTimeout();
-            startStream();
           },
           onActivity: refreshTimeout,
           onDelta: (delta) => {

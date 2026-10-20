@@ -522,6 +522,19 @@ app.whenReady().then(async () => {
   assert.equal((await response.json()).error.code, 'chat_changed');
   await eventually(() => page('document.getElementById("composer-submit-button").dataset.testid === "send-button"'));
 
+  // Regressão real de DOM misto: mensagens antigas usam author-role, enquanto
+  // novos turnos são identificados por chatgpt-search-unit-key. Antes desta
+  // correção a presença das antigas ocultava as novas e o HTTP nunca fechava.
+  await page('window.modernMarkup = true; window.responseDelay = 180;');
+  response = await request('Teste de marcadores antigos e modernos juntos');
+  const mixed = await response.json();
+  assert.equal(response.status, 200, JSON.stringify(mixed));
+  assert.equal(mixed.choices[0].message.content,
+    'Resposta final: Teste de marcadores antigos e modernos juntos');
+  assert.equal(await page('document.querySelectorAll("[data-message-author-role=user]").length > 0'), true);
+  assert.equal(await page('document.querySelectorAll("[data-chatgpt-search-unit-key$=user]").length > 0'), true);
+  await page('window.modernMarkup = false;');
+
   // Estrutura atual do ChatGPT: editor sem id, marcadores de busca nas mensagens
   // e conclusão explícita do turno, sem os seletores legados.
   await page(`(() => {

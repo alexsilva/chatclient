@@ -1,7 +1,7 @@
 (() => {
   const API_KEY = '__chatClientAppServer';
   const TAP_KEY = '__chatClientAppServerTap';
-  const VERSION = 12;
+  const VERSION = 13;
   if (window[API_KEY]?.version === VERSION) {
     return;
   }
@@ -64,11 +64,18 @@
 
   function messages(role, providerId) {
     const semantic = [...document.querySelectorAll(`[data-message-author-role="${role}"]`)];
+    if (providerId === 'chatgpt') {
+      // A conversa pode manter nós legados e nós modernos simultaneamente.
+      // Nunca usar a presença de um marcador antigo como condição para
+      // descartar mensagens novas e ficar aguardando a resposta para sempre.
+      const keyed = [...document.querySelectorAll(`[data-chatgpt-search-unit-key$=":${role}"]`)];
+      const candidates = [...new Set([...semantic, ...keyed])];
+      return candidates.filter((element) => !candidates.some((other) =>
+        other !== element && other.contains(element))).sort((a, b) =>
+        a === b ? 0 : (a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING) ? -1 : 1);
+    }
     if (semantic.length) {
       return semantic;
-    }
-    if (providerId === 'chatgpt') {
-      return [...document.querySelectorAll(`[data-chatgpt-search-unit-key$=":${role}"]`)];
     }
     // Grok não publica o atributo do ChatGPT. Limitamos a busca às bolhas de
     // mensagem, sem incluir blocos de raciocínio ou a navegação lateral.

@@ -72,6 +72,37 @@ test('encaminha só a última mensagem user e devolve o texto exato da UI', asyn
   assert.equal('usage' in body, false);
 });
 
+test('diagnóstico autenticado registra status HTTP sem armazenar prompts ou tokens', async (t) => {
+  const { request, server } = await setup(t, async ({ message, onStart }) => {
+    onStart();
+    if (message === 'FALHA-SIGILOSA') {
+      throw new AppServerError('segredo de usuário', 502, 'provider_error');
+    }
+    return 'Resposta privada';
+  });
+  const initial = await fetch(`${server.getState().baseUrl.replace('/v1', '')}/v1/diagnostics`);
+  assert.equal(initial.status, 401);
+  const good = await request({ ...prompt('PROMPT-PRIVADO-123'), stream: true });
+  assert.equal(good.status, 200);
+  await good.text();
+  const failed = await request(prompt('FALHA-SIGILOSA'));
+  assert.equal(failed.status, 502);
+  await failed.text();
+  const diag = await fetch(`${server.getState().baseUrl}/diagnostics`, {
+    headers: { Authorization: 'Bearer test-key' }
+  });
+  assert.equal(diag.status, 200);
+  const payload = await diag.json();
+  assert.equal(payload.version, 1);
+  const completions = payload.receipts.filter((entry) => entry.path === '/v1/chat/completions');
+  assert.equal(completions.length, 2);
+  assert.deepEqual(completions.map((entry) => entry.status), [200, 502]);
+  assert.deepEqual(completions.map((entry) => entry.stream), [true, false]);
+  assert.equal(completions[1].errorCode, 'provider_error');
+  const serialized = JSON.stringify(payload);
+  assert.doesNotMatch(serialized, /PROMPT-PRIVADO-123|FALHA-SIGILOSA|Resposta privada|segredo de usuário|test-key/);
+});
+
 test('stream SSE mantém o texto, termina com stop e [DONE]', async (t) => {
   const { request } = await setup(t, async ({ onStart, onDelta }) => {
     onStart();

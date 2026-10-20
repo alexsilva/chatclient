@@ -69,6 +69,10 @@ function errorPayload(error) {
 }
 
 function sendJson(response, status, data) {
+  // Diagnostic metadata only; never store request bodies, tokens or response text.
+  if (data?.error?.code) {
+    response._bridgeErrorCode = String(data.error.code);
+  }
   response.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' });
   response.end(JSON.stringify(data));
 }
@@ -119,6 +123,9 @@ class AppServer {
     this.activeRequest = null;
     this.error = null;
     this.configQueue = Promise.resolve();
+    // Bounded in-memory receipts for diagnosing actual client requests.
+    // All content, bearer values and raw errors are deliberately excluded.
+    this.requestReceipts = [];
   }
 
   getState() {
@@ -158,6 +165,34 @@ class AppServer {
 
   async start() {
     const server = http.createServer((request, response) => {
+      const begin = Date.now();
+      const path = new URL(request.url || '/', 'http://localhost').pathname;
+      const receipt = {
+        time: new Date(begin).toISOString(),
+        method: request.method,
+        path,
+        bodyBytes: Number(request.headers['content-length']) || null,
+        stream: null,
+        model: null,
+        status: null,
+        durationMs: null,
+        errorCode: null,
+        finished: false
+      };
+      response._receipt = receipt;
+      let finalized = false;
+      const finalize = (finished) => {
+        if (finalized) return;
+        finalized = true;
+        receipt.status = response.headersSent ? response.statusCode : null;
+        receipt.durationMs = Date.now() - begin;
+        receipt.errorCode = response._bridgeErrorCode || null;
+        receipt.finished = finished;
+        this.requestReceipts.push(receipt);
+        if (this.requestReceipts.length > 64) this.requestReceipts.shift();
+      };
+      response.once('finish', () => finalize(true));
+      response.once('close', () => finalize(false));
       this.handleRequest(request, response).catch((error) => {
         if (!response.destroyed && !response.writableEnded) {
           sendJson(response, error.status || 500, errorPayload(error));
@@ -215,6 +250,17 @@ class AppServer {
       throw new AppServerError('Chave inválida. Use Authorization: Bearer <key>.', 401, 'invalid_api_key');
     }
     const path = new URL(request.url, 'http://localhost').pathname.replace(/\/$/, '');
+    if (request.method === 'GET' && path === '/v1/diagnostics') {
+      // Same bearer authentication as chat/completions; loopback only.
+      sendJson(response, 200, {
+        version: 1,
+        pid: process.pid,
+        listeningPort: this.config.port,
+        activeRequest: Boolean(this.activeRequest),
+        receipts: this.requestReceipts.slice()
+      });
+      return;
+    }
     if (request.method === 'GET' && path === '/v1/models') {
       sendJson(response, 200, { object: 'list', data: [
         { id: MODEL_ID, object: 'model', created: 0, owned_by: 'chatclient' }
@@ -226,6 +272,11 @@ class AppServer {
     }
 
     const body = await readBody(request);
+    if (response._receipt) {
+      response._receipt.stream = body?.stream === true;
+      response._receipt.model = typeof body?.model === 'string' ?
+        body.model.slice(0, 80) : null;
+    }
     const message = lastUserMessage(body);
     if (this.activeRequest) {
       throw new AppServerError('O chat está atendendo outro pedido.', 409, 'chat_busy');
@@ -362,6 +413,7 @@ class AppServer {
     } catch (error) {
       if (!response.destroyed && !response.writableEnded) {
         if (response.headersSent) {
+          response._bridgeErrorCode = error.code || 'bridge_error';
           event(errorPayload(error));
           response.end('data: [DONE]\n\n');
         } else {

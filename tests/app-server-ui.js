@@ -972,9 +972,16 @@ app.whenReady().then(async () => {
   assert.equal((await response.json()).choices[0].message.content, 'Resposta final: Mensagem no Grok');
   assert.deepEqual(await grokPage('window.sentMessages'), ['Mensagem no Grok']);
 
+  // Claude ganha uma view independente, com URL confiável e estado de modo próprio.
+  await shell('window.chatClient.setMode("claude")');
+  const claude = await eventually(() => window.contentView.children.map((view) => view.webContents)
+    .find((view) => view.getURL().startsWith('https://claude.ai')));
+  await eventually(() => shell('window.chatClient.getState().then(state => state.mode === "claude" && state.appServer.targetProvider === "claude")'));
+  assert.equal(claude.isDestroyed(), false);
+
   await shell('window.chatClient.setMode("compare")');
-  contents.focus();
   await eventually(() => shell('window.chatClient.getState().then(state => state.appServer.targetProvider === "chatgpt")'));
+  contents.focus();
   response = await request('Chat selecionado no modo Comparar');
   assert.equal(response.status, 200);
   assert.equal((await response.json()).choices[0].message.content, 'Resposta final: Chat selecionado no modo Comparar');
@@ -1004,7 +1011,7 @@ app.whenReady().then(async () => {
   writeFileSync(screenshotPath, (await window.webContents.capturePage()).toPNG());
   await shell('document.getElementById("serverSwitch").click();');
   await eventually(() => shell('window.chatClient.getState().then(state => !state.appServer.running)'));
-  console.log('Testes integrados Electron: OK. Modal, HTTP, ChatGPT/Grok, SSE, thinking ao vivo, envio direto, steering, espera do turno, fallback, rascunho, cancelamento, concorrência e troca de conversa.');
+  console.log('Testes integrados Electron: OK. Modal, HTTP, ChatGPT/Grok/Claude, SSE, thinking ao vivo, envio direto, steering, espera do turno, fallback, rascunho, cancelamento, concorrência e troca de conversa.');
   console.log(`Screenshot do modal: ${screenshotPath}`);
   app.exit(0);
 }).catch((error) => {

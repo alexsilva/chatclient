@@ -321,7 +321,12 @@ html[data-rail-visible="true"] .toolbar {
 }
 
 html[data-browser-preview="true"][data-mode="chatgpt"] .preview-grok,
-html[data-browser-preview="true"][data-mode="grok"] .preview-chatgpt {
+html[data-browser-preview="true"][data-mode="chatgpt"] .preview-claude,
+html[data-browser-preview="true"][data-mode="grok"] .preview-chatgpt,
+html[data-browser-preview="true"][data-mode="grok"] .preview-claude,
+html[data-browser-preview="true"][data-mode="claude"] .preview-chatgpt,
+html[data-browser-preview="true"][data-mode="claude"] .preview-grok,
+html[data-browser-preview="true"][data-mode="compare"] .preview-claude {
   display: none;
 }
 

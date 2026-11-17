@@ -163,6 +163,7 @@
     const labels = {
       chatgpt: 'ChatGPT',
       grok: 'Grok',
+      claude: 'Claude',
       compare: 'Comparar'
     };
     modeLabel.textContent = labels[state.mode] || 'ChatGPT';
@@ -206,7 +207,7 @@
       serverPortInput.value = String(config.port);
       serverKeyInput.value = config.key;
     }
-    const provider = config.targetProvider === 'grok' ? 'Grok' : 'ChatGPT';
+    const provider = ({ chatgpt: 'ChatGPT', grok: 'Grok', claude: 'Claude' })[config.targetProvider] || 'ChatGPT';
     serverStatus.classList.toggle('error', Boolean(config.error));
     serverStatus.textContent = config.error || (config.running
       ? `${config.busy ? 'Aguardando resposta' : 'Servidor ativo'} · ${provider}`
@@ -313,7 +314,7 @@
   }
 
   async function setMode(nextMode) {
-    if (!['chatgpt', 'grok', 'compare'].includes(nextMode)) {
+    if (!['chatgpt', 'grok', 'claude', 'compare'].includes(nextMode)) {
       return;
     }
 
@@ -628,8 +629,8 @@
       return;
     }
 
-    if (event.altKey && ['1', '2', '3'].includes(event.key)) {
-      const mapping = { '1': 'chatgpt', '2': 'grok', '3': 'compare' };
+    if (event.altKey && ['1', '2', '3', '4'].includes(event.key)) {
+      const mapping = { '1': 'chatgpt', '2': 'grok', '3': 'compare', '4': 'claude' };
       setMode(mapping[event.key]);
     }
   });
@@ -646,7 +647,8 @@
 
     bridge.onProviderStatus((status) => {
       if (status.error) {
-        showToast(`${status.providerId === 'grok' ? 'Grok' : 'ChatGPT'}: ${status.error}`);
+        const provider = ({ chatgpt: 'ChatGPT', grok: 'Grok', claude: 'Claude' })[status.providerId] || status.providerId;
+        showToast(`${provider}: ${status.error}`);
       }
     });
 
@@ -679,6 +681,13 @@
         <div class="preview-copy">
           <strong>What do you want to know?</strong>
           <span>Prévia visual do WebContentsView do Grok.</span>
+        </div>
+      </section>
+      <section class="preview-provider preview-claude">
+        <div class="preview-provider-top">Claude</div>
+        <div class="preview-copy">
+          <strong>Em que posso ajudar?</strong>
+          <span>Prévia visual do WebContentsView do Claude.</span>
         </div>
       </section>
     `;

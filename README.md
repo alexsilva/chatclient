@@ -1,13 +1,14 @@
 # ChatClient
 
-Cliente desktop Electron para usar múltiplos provedores de IA em uma única interface. A primeira versão multi-provider mantém ChatGPT e Grok carregados em `WebContentsView` independentes e persistentes.
+Cliente desktop Electron para usar múltiplos provedores de IA em uma única interface. ChatGPT, Grok e Claude são carregados em `WebContentsView` independentes e persistentes.
 
 ## Interface
 
-O shell do ChatClient fornece três modos principais:
+O shell do ChatClient oferece três provedores e um modo de comparação:
 
 - **ChatGPT** — exibe `https://chatgpt.com`.
 - **Grok** — exibe `https://grok.com/`.
+- **Claude** — exibe `https://claude.ai/`.
 - **Comparar** — exibe os dois provedores lado a lado com divisor ajustável.
 
 Os provedores permanecem vivos ao alternar entre os modos, evitando reload desnecessário e preservando a sessão de cada serviço.
@@ -17,6 +18,7 @@ Os provedores permanecem vivos ao alternar entre os modos, evitando reload desne
 - `Alt+1`: ChatGPT
 - `Alt+2`: Grok
 - `Alt+3`: Comparar
+- `Alt+4`: Claude
 - `F5` ou `Ctrl+R`: recarrega o provedor ativo; no modo Comparar recarrega ambos
 
 ## Aprovação automática de apps
@@ -146,7 +148,7 @@ npm run preview
 
 Abra `http://127.0.0.1:4173`.
 
-No modo de prévia, placeholders representam os `WebContentsView` de ChatGPT e Grok. Isso permite validar layout, responsividade e interações do shell diretamente no browser.
+No modo de prévia, placeholders representam os `WebContentsView` de ChatGPT, Grok e Claude. Isso permite validar layout, responsividade e interações do shell diretamente no browser.
 
 ### Testes da ponte
 
@@ -173,8 +175,12 @@ BrowserWindow
 │   └── app.js
 ├── WebContentsView: ChatGPT
 │   └── https://chatgpt.com
-└── WebContentsView: Grok
-    └── https://grok.com/
+├── WebContentsView: Grok
+│   └── https://grok.com/
+└── WebContentsView: Claude
+    └── https://claude.ai/
+
+Comparar: ChatGPT + Grok
 ```
 
 `main.js` controla ciclo de vida, navegação e layout dos provedores. `app-server.js` oferece o servidor HTTP e chama a ponte da view ativa; `injections/app-server.js` envia pelo callback nativo do ChatGPT (ou pelo campo da página) e observa o thinking visível e a resposta. `preload.js` expõe apenas a ponte IPC necessária ao shell. Scripts específicos de páginas ficam em `injections/`.

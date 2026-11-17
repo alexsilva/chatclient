@@ -13,6 +13,7 @@
     const labels = {
       chatgpt: 'ChatGPT',
       grok: 'Grok',
+      claude: 'Claude',
       compare: 'Comparar'
     };
     modeLabel.textContent = labels[currentState.mode] || 'ChatGPT';

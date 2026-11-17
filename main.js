@@ -1,6 +1,6 @@
 /*
  * ChatClient
- * Multi-provider Electron shell for ChatGPT and Grok.
+ * Multi-provider Electron shell for ChatGPT, Grok and Claude.
  */
 const { app, BrowserWindow, WebContentsView, ipcMain, shell, screen } = require('electron');
 const {
@@ -79,10 +79,15 @@ const PROVIDERS = {
     id: 'grok',
     label: 'Grok',
     url: 'https://grok.com/'
+  },
+  claude: {
+    id: 'claude',
+    label: 'Claude',
+    url: 'https://claude.ai/'
   }
 };
 
-const MODES = new Set(['chatgpt', 'grok', 'compare']);
+const MODES = new Set([...Object.keys(PROVIDERS), 'compare']);
 const MIN_WINDOW_WIDTH = 735;
 const MIN_WINDOW_HEIGHT = 640;
 const DEFAULT_LAYOUT = {
@@ -226,7 +231,7 @@ function loadSessionState() {
 
     if (MODES.has(saved.mode)) {
       mode = saved.mode;
-      activeProviderId = mode === 'grok' ? 'grok' : 'chatgpt';
+      activeProviderId = mode === 'compare' ? 'chatgpt' : mode;
     }
 
     if (Number.isFinite(saved.splitRatio)) {
@@ -798,6 +803,10 @@ function isTrustedProviderUrl(providerId, url) {
       return hostname === 'grok.com' || hostname.endsWith('.grok.com') ||
         hostname === 'x.ai' || hostname.endsWith('.x.ai');
     }
+
+    if (providerId === 'claude') {
+      return hostname === 'claude.ai' || hostname.endsWith('.claude.ai');
+    }
   } catch {
     return false;
   }
@@ -1367,14 +1376,15 @@ function applyViewLayout() {
 
   updateLoadingOverlay();
 
-  const chatgpt = providerViews.get('chatgpt');
-  const grok = providerViews.get('grok');
-
   if (shellOverlayVisible) {
-    chatgpt?.setVisible(false);
-    grok?.setVisible(false);
+    for (const view of providerViews.values()) {
+      view.setVisible(false);
+    }
     return;
   }
+
+  const chatgpt = providerViews.get('chatgpt');
+  const grok = providerViews.get('grok');
 
   const { x, y, width, height, dividerWidth, splitRatio } = layout;
   const usableWidth = Math.max(0, width - dividerWidth);
@@ -1386,8 +1396,11 @@ function applyViewLayout() {
       return;
     }
 
-    chatgpt.setVisible(true);
-    grok.setVisible(true);
+    for (const [providerId, view] of providerViews) {
+      const isVisible = providerId === 'chatgpt' || providerId === 'grok';
+      view.setVisible(isVisible);
+      view.webContents.setAudioMuted(!isVisible);
+    }
     chatgpt.webContents.setAudioMuted(false);
     grok.webContents.setAudioMuted(false);
     setViewBounds(chatgpt, { x, y, width: leftWidth, height });
@@ -1400,18 +1413,16 @@ function applyViewLayout() {
     return;
   }
 
-  const active = mode === 'grok' ? grok : chatgpt;
-  const inactive = mode === 'grok' ? chatgpt : grok;
+  const active = providerViews.get(mode);
 
   if (!active) {
     return;
   }
 
-  active.setVisible(true);
-  active.webContents.setAudioMuted(false);
-  if (inactive) {
-    inactive.setVisible(false);
-    inactive.webContents.setAudioMuted(true);
+  for (const [providerId, view] of providerViews) {
+    const isActive = providerId === mode;
+    view.setVisible(isActive);
+    view.webContents.setAudioMuted(!isActive);
   }
   setViewBounds(active, { x, y, width, height });
 }
@@ -1436,7 +1447,11 @@ function setMode(nextMode, notify = true) {
   }
 
   mode = nextMode;
-  if (mode !== 'compare') {
+  if (mode === 'compare') {
+    if (!['chatgpt', 'grok'].includes(activeProviderId)) {
+      activeProviderId = 'chatgpt';
+    }
+  } else {
     activeProviderId = mode;
   }
   scheduleSessionSave();
@@ -1484,6 +1499,11 @@ function handleShortcut(input) {
 
   if (input.alt && input.key === '3') {
     setMode('compare');
+    return true;
+  }
+
+  if (input.alt && input.key === '4') {
+    setMode('claude');
     return true;
   }
 

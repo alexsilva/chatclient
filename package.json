@@ -1,7 +1,7 @@
 {
   "name": "chatclient",
   "version": "1.0.8",
-  "description": "Linux-friendly multi-provider desktop client for ChatGPT and Grok",
+  "description": "Linux-friendly multi-provider desktop client for ChatGPT, Grok and Claude",
   "main": "main.js",
   "author": {
     "name": "Stephan Coertzen",
